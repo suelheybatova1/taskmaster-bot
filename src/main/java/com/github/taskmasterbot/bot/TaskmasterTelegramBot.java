@@ -2,11 +2,14 @@ package com.github.taskmasterbot.bot;
 
 import com.github.taskmasterbot.config.TelegramProperties;
 import com.github.taskmasterbot.dto.TaskPage;
+import com.github.taskmasterbot.dto.TaskDetails;
 import com.github.taskmasterbot.dto.TelegramUserData;
 import com.github.taskmasterbot.service.TaskService;
+import com.github.taskmasterbot.service.TaskTransitionResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.telegram.telegrambots.longpolling.interfaces.LongPollingUpdateConsumer;
 import org.telegram.telegrambots.longpolling.starter.SpringLongPollingBot;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
@@ -46,6 +49,8 @@ public class TaskmasterTelegramBot
     static final String STATISTICS_RESPONSE = "Statistics will be added later.";
     static final String SETTINGS_RESPONSE = "⚙️ Settings";
     static final String TASK_NOT_FOUND_RESPONSE = "Task not found.";
+    static final String OPTIMISTIC_LOCK_RESPONSE =
+            "Task was changed. Please refresh and try again.";
 
     private static final Logger log = LoggerFactory.getLogger(TaskmasterTelegramBot.class);
     private static final Pattern PAGE_HEADER_PATTERN =
@@ -62,6 +67,9 @@ public class TaskmasterTelegramBot
     private final TaskPageCallback taskPageCallback;
     private final TaskDeletionCallback taskDeletionCallback;
     private final TaskDeletionKeyboard taskDeletionKeyboard;
+    private final TaskActionCallback taskActionCallback;
+    private final TaskDetailsFormatter taskDetailsFormatter;
+    private final TaskDetailsKeyboard taskDetailsKeyboard;
     private final Map<Long, Integer> currentTaskPages = new ConcurrentHashMap<>();
     private final Map<Long, PendingTaskDeletion> pendingTaskDeletions =
             new ConcurrentHashMap<>();
@@ -78,7 +86,10 @@ public class TaskmasterTelegramBot
             TaskPaginationKeyboard taskPaginationKeyboard,
             TaskPageCallback taskPageCallback,
             TaskDeletionCallback taskDeletionCallback,
-            TaskDeletionKeyboard taskDeletionKeyboard
+            TaskDeletionKeyboard taskDeletionKeyboard,
+            TaskActionCallback taskActionCallback,
+            TaskDetailsFormatter taskDetailsFormatter,
+            TaskDetailsKeyboard taskDetailsKeyboard
     ) {
         this.properties = properties;
         this.telegramClient = telegramClient;
@@ -91,6 +102,9 @@ public class TaskmasterTelegramBot
         this.taskPageCallback = taskPageCallback;
         this.taskDeletionCallback = taskDeletionCallback;
         this.taskDeletionKeyboard = taskDeletionKeyboard;
+        this.taskActionCallback = taskActionCallback;
+        this.taskDetailsFormatter = taskDetailsFormatter;
+        this.taskDetailsKeyboard = taskDetailsKeyboard;
     }
 
     @Override
@@ -218,10 +232,26 @@ public class TaskmasterTelegramBot
         var deletion = taskDeletionCallback.parse(callbackData);
         if (deletion.isPresent()) {
             answerCallback(callbackQuery.getId(), null);
-            handleTaskDeletion(
+            try {
+                handleTaskDeletion(
+                        chatId,
+                        userId,
+                        deletion.orElseThrow(),
+                        pageNumber(callbackQuery.getMessage(), userId)
+                );
+            } catch (ObjectOptimisticLockingFailureException exception) {
+                sendMessage(chatId, OPTIMISTIC_LOCK_RESPONSE, null);
+            }
+            return;
+        }
+
+        var taskAction = taskActionCallback.parse(callbackData);
+        if (taskAction.isPresent()) {
+            answerCallback(callbackQuery.getId(), null);
+            handleTaskAction(
                     chatId,
                     userId,
-                    deletion.orElseThrow(),
+                    taskAction.orElseThrow(),
                     pageNumber(callbackQuery.getMessage(), userId)
             );
             return;
@@ -233,6 +263,69 @@ public class TaskmasterTelegramBot
         }
 
         answerCallback(callbackQuery.getId(), "Invalid action.");
+    }
+
+    private void handleTaskAction(
+            Long chatId,
+            Long userId,
+            TaskActionCallback.ParsedCallback callback,
+            int originatingPage
+    ) {
+        if (callback.action() == TaskActionCallback.Action.VIEW) {
+            currentTaskPages.put(userId, originatingPage);
+            sendTaskDetails(chatId, userId, callback.taskId());
+            return;
+        }
+
+        try {
+            TaskTransitionResult result = switch (callback.action()) {
+                case START -> taskService.startTask(userId, callback.taskId());
+                case COMPLETE -> taskService.completeTask(userId, callback.taskId());
+                case VIEW -> throw new IllegalStateException("View handled separately");
+            };
+            sendTransitionResult(chatId, userId, callback, result);
+        } catch (ObjectOptimisticLockingFailureException exception) {
+            sendMessage(chatId, OPTIMISTIC_LOCK_RESPONSE, null);
+        }
+    }
+
+    private void sendTransitionResult(
+            Long chatId,
+            Long userId,
+            TaskActionCallback.ParsedCallback callback,
+            TaskTransitionResult result
+    ) {
+        if (result == TaskTransitionResult.NOT_FOUND) {
+            sendMessage(chatId, TASK_NOT_FOUND_RESPONSE, null);
+            return;
+        }
+
+        String response = switch (result) {
+            case SUCCESS -> callback.action() == TaskActionCallback.Action.START
+                    ? "🚧 Task #%d is now in progress.".formatted(callback.taskId())
+                    : "✅ Task #%d completed.".formatted(callback.taskId());
+            case ALREADY_IN_PROGRESS -> "Task is already in progress.";
+            case ALREADY_COMPLETED -> "Task is already completed.";
+            case NOT_FOUND -> throw new IllegalStateException("Handled before switch");
+        };
+        sendMessage(chatId, response, null);
+        sendTaskDetails(chatId, userId, callback.taskId());
+    }
+
+    private void sendTaskDetails(Long chatId, Long userId, long taskId) {
+        var task = taskService.getTaskDetails(userId, taskId);
+        if (task.isEmpty()) {
+            sendMessage(chatId, TASK_NOT_FOUND_RESPONSE, null);
+            return;
+        }
+
+        TaskDetails details = task.orElseThrow();
+        int backPage = currentTaskPages.getOrDefault(userId, 0);
+        sendMessage(
+                chatId,
+                taskDetailsFormatter.format(details),
+                taskDetailsKeyboard.create(details, backPage)
+        );
     }
 
     private void handleTaskDeletion(

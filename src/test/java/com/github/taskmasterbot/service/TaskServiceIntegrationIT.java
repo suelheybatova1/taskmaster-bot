@@ -11,6 +11,7 @@ import com.github.taskmasterbot.repository.TaskRepository;
 import com.github.taskmasterbot.repository.TelegramUserRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceUnitUtil;
+import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
@@ -18,6 +19,8 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.context.annotation.Import;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -26,6 +29,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.time.Instant;
+import java.time.Clock;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,9 +40,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
-@Import(TaskService.class)
+@Import({TaskService.class, TaskServiceIntegrationIT.ClockConfiguration.class})
 @Testcontainers
 class TaskServiceIntegrationIT {
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class ClockConfiguration {
+
+        @Bean
+        Clock testClock() {
+            return Clock.systemUTC();
+        }
+    }
 
     @Container
     static final PostgreSQLContainer POSTGRES =
@@ -173,8 +186,19 @@ class TaskServiceIntegrationIT {
                 String.class
         );
 
-        assertThat(appliedMigrations).isEqualTo(1);
+        assertThat(appliedMigrations).isEqualTo(2);
         assertThat(tables).containsExactly("tasks", "telegram_users");
+        assertThat(jdbcTemplate.queryForObject(
+                """
+                SELECT count(*)
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'tasks'
+                  AND column_name = 'version'
+                  AND is_nullable = 'NO'
+                """,
+                Integer.class
+        )).isEqualTo(1);
     }
 
     @Test
@@ -407,6 +431,96 @@ class TaskServiceIntegrationIT {
     @Test
     void bulkDeleteReturnsZeroForUserWithoutTasks() {
         assertThat(taskService.deleteAllTasks(999999L)).isZero();
+    }
+
+    @Test
+    void readsOwnedTaskDetailsAndEnforcesStatusTransitions() {
+        Task task = taskService.createTask(command(
+                2501L, 3501L, null, "Transition task", "Full description",
+                TaskPriority.HIGH, Instant.parse("2030-01-01T10:00:00Z")
+        ));
+        Task otherUsersTask = taskService.createTask(command(
+                2502L, 3502L, null, "Foreign task", null,
+                TaskPriority.LOW, null
+        ));
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(taskService.getTaskDetails(2501L, task.getId()))
+                .get()
+                .satisfies(details -> {
+                    assertThat(details.title()).isEqualTo("Transition task");
+                    assertThat(details.description()).isEqualTo("Full description");
+                    assertThat(details.status()).isEqualTo(TaskStatus.TODO);
+                });
+        assertThat(taskService.getTaskDetails(2501L, otherUsersTask.getId())).isEmpty();
+        assertThat(taskService.startTask(2501L, otherUsersTask.getId()))
+                .isEqualTo(TaskTransitionResult.NOT_FOUND);
+
+        assertThat(taskService.startTask(2501L, task.getId()))
+                .isEqualTo(TaskTransitionResult.SUCCESS);
+        entityManager.flush();
+        entityManager.clear();
+        Task started = taskRepository.findById(task.getId()).orElseThrow();
+        assertThat(started.getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
+        assertThat(started.getCompletedAt()).isNull();
+        assertThat(started.getVersion()).isEqualTo(1);
+        assertThat(taskService.startTask(2501L, task.getId()))
+                .isEqualTo(TaskTransitionResult.ALREADY_IN_PROGRESS);
+
+        Instant beforeCompletion = Instant.now();
+        assertThat(taskService.completeTask(2501L, task.getId()))
+                .isEqualTo(TaskTransitionResult.SUCCESS);
+        entityManager.flush();
+        entityManager.clear();
+        Task completed = taskRepository.findById(task.getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(completed.getCompletedAt()).isAfterOrEqualTo(beforeCompletion);
+        assertThat(completed.getVersion()).isEqualTo(2);
+        assertThat(taskService.completeTask(2501L, task.getId()))
+                .isEqualTo(TaskTransitionResult.ALREADY_COMPLETED);
+        assertThat(taskService.startTask(2501L, task.getId()))
+                .isEqualTo(TaskTransitionResult.ALREADY_COMPLETED);
+    }
+
+    @Test
+    void completesTodoTaskDirectlyAndSetsCompletedAt() {
+        Task task = taskService.createTask(command(
+                2601L, 3601L, null, "Direct completion", null,
+                TaskPriority.MEDIUM, null
+        ));
+        entityManager.flush();
+        entityManager.clear();
+
+        Instant beforeCompletion = Instant.now();
+        assertThat(taskService.completeTask(2601L, task.getId()))
+                .isEqualTo(TaskTransitionResult.SUCCESS);
+        entityManager.flush();
+        entityManager.clear();
+
+        Task completed = taskRepository.findById(task.getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(completed.getCompletedAt()).isAfterOrEqualTo(beforeCompletion);
+    }
+
+    @Test
+    void detectsOptimisticLockConflict() {
+        Task task = taskService.createTask(command(
+                2701L, 3701L, null, "Concurrent task", null,
+                TaskPriority.LOW, null
+        ));
+        entityManager.flush();
+
+        jdbcTemplate.update(
+                "UPDATE tasks SET version = version + 1 WHERE id = ?",
+                task.getId()
+        );
+        assertThat(task.start()).isTrue();
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                OptimisticLockException.class,
+                entityManager::flush
+        );
     }
 
     private CreateTaskCommand command(

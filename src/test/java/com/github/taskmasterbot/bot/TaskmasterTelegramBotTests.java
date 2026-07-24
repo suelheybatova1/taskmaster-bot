@@ -4,11 +4,14 @@ import com.github.taskmasterbot.config.ApplicationProperties;
 import com.github.taskmasterbot.config.TelegramProperties;
 import com.github.taskmasterbot.dto.CreateTaskCommand;
 import com.github.taskmasterbot.dto.TaskListItem;
+import com.github.taskmasterbot.dto.TaskDetails;
 import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.entity.Task;
 import com.github.taskmasterbot.entity.TaskPriority;
 import com.github.taskmasterbot.entity.TaskStatus;
 import com.github.taskmasterbot.service.TaskService;
+import com.github.taskmasterbot.service.TaskTransitionResult;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -67,6 +70,9 @@ class TaskmasterTelegramBotTests {
         );
         TaskPageCallback pageCallback = new TaskPageCallback();
         TaskDeletionCallback deletionCallback = new TaskDeletionCallback();
+        TaskActionCallback actionCallback = new TaskActionCallback();
+        TaskDetailsFormatter detailsFormatter =
+                new TaskDetailsFormatter(new ApplicationProperties(TIME_ZONE));
         bot = new TaskmasterTelegramBot(
                 new TelegramProperties("test_bot", "test-token"),
                 telegramClient,
@@ -75,10 +81,13 @@ class TaskmasterTelegramBotTests {
                 conversationService,
                 taskService,
                 new TaskListFormatter(new ApplicationProperties(TIME_ZONE)),
-                new TaskPaginationKeyboard(pageCallback, deletionCallback),
+                new TaskPaginationKeyboard(pageCallback, deletionCallback, actionCallback),
                 pageCallback,
                 deletionCallback,
-                new TaskDeletionKeyboard(deletionCallback)
+                new TaskDeletionKeyboard(deletionCallback),
+                actionCallback,
+                detailsFormatter,
+                new TaskDetailsKeyboard(actionCallback, deletionCallback, pageCallback)
         );
     }
 
@@ -341,7 +350,7 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
 
         InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
-        assertThat(keyboard.getKeyboard()).hasSize(11);
+        assertThat(keyboard.getKeyboard()).hasSize(21);
         assertThat(keyboard.getKeyboard().getLast()).hasSize(1);
         assertThat(keyboard.getKeyboard().getLast().getFirst().getText()).isEqualTo("Next ▶");
         assertThat(keyboard.getKeyboard().getLast().getFirst().getCallbackData())
@@ -395,6 +404,167 @@ class TaskmasterTelegramBotTests {
         verify(taskService).getActiveTasks(USER_ID, 999);
         assertThat(response.getText())
                 .contains("Page 2/2", "📝 #101 | Task 101");
+    }
+
+    @Test
+    void opensOwnTodoTaskWithFullDetailsAndActions() throws Exception {
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.TODO, "Buy milk and bread", true)));
+
+        SendMessage response = sendCallback(USER_ID, "task:view:12");
+
+        assertThat(response.getText()).isEqualTo("""
+                📝 Task #12
+
+                Title: Buy groceries
+                Description: Buy milk and bread
+                Priority: 🔴 High
+                Status: 📝 Todo
+                Deadline: 2026-12-31 18:00
+                Created: 2026-07-25 14:30""");
+        assertThat(inlineButtonTexts(response))
+                .containsExactly("▶ Start", "✅ Complete", "🗑 Delete", "⬅ Back to tasks");
+    }
+
+    @Test
+    void showsInProgressTaskDetailsWithAllowedActions() throws Exception {
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.IN_PROGRESS, null, false)));
+
+        SendMessage response = sendCallback(USER_ID, "task:view:12");
+
+        assertThat(response.getText())
+                .contains(
+                        "Description: No description",
+                        "Status: 🚧 In progress",
+                        "Deadline: No deadline"
+                );
+        assertThat(inlineButtonTexts(response))
+                .containsExactly("✅ Complete", "🗑 Delete", "⬅ Back to tasks");
+    }
+
+    @Test
+    void showsCompletedTaskDetailsWithAllowedActions() throws Exception {
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.COMPLETED, null, false)));
+
+        SendMessage response = sendCallback(USER_ID, "task:view:12");
+
+        assertThat(response.getText()).contains("Status: ✅ Completed");
+        assertThat(inlineButtonTexts(response))
+                .containsExactly("🗑 Delete", "⬅ Back to tasks");
+    }
+
+    @Test
+    void cannotOpenForeignOrMissingTask() throws Exception {
+        when(taskService.getTaskDetails(USER_ID, 99L)).thenReturn(Optional.empty());
+
+        assertThat(sendCallback(USER_ID, "task:view:99").getText())
+                .isEqualTo(TaskmasterTelegramBot.TASK_NOT_FOUND_RESPONSE);
+        verify(taskService).getTaskDetails(USER_ID, 99L);
+    }
+
+    @Test
+    void startsTodoTaskAndRefreshesDetails() throws Exception {
+        when(taskService.startTask(USER_ID, 12L)).thenReturn(TaskTransitionResult.SUCCESS);
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.IN_PROGRESS, null, false)));
+
+        clearInvocations(telegramClient);
+        bot.consume(callbackUpdate(USER_ID, "task:start:12"));
+
+        assertThat(sentMessages())
+                .extracting(SendMessage::getText)
+                .containsExactly(
+                        "🚧 Task #12 is now in progress.",
+                        new TaskDetailsFormatter(new ApplicationProperties(TIME_ZONE))
+                                .format(details(TaskStatus.IN_PROGRESS, null, false))
+                );
+    }
+
+    @Test
+    void handlesStartForAlreadyStartedAndCompletedTasks() throws Exception {
+        when(taskService.startTask(USER_ID, 12L))
+                .thenReturn(TaskTransitionResult.ALREADY_IN_PROGRESS);
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.IN_PROGRESS, null, false)));
+        assertThat(sendCallback(USER_ID, "task:start:12").getText())
+                .isEqualTo("Task is already in progress.");
+
+        when(taskService.startTask(USER_ID, 12L))
+                .thenReturn(TaskTransitionResult.ALREADY_COMPLETED);
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.COMPLETED, null, false)));
+        assertThat(sendCallback(USER_ID, "task:start:12").getText())
+                .isEqualTo("Task is already completed.");
+    }
+
+    @Test
+    void completesTodoAndInProgressTasksAndRefreshesDetails() throws Exception {
+        when(taskService.completeTask(USER_ID, 12L)).thenReturn(TaskTransitionResult.SUCCESS);
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.COMPLETED, null, false)));
+
+        assertThat(sendCallback(USER_ID, "task:complete:12").getText())
+                .isEqualTo("✅ Task #12 completed.");
+
+        when(taskService.completeTask(USER_ID, 13L)).thenReturn(TaskTransitionResult.SUCCESS);
+        when(taskService.getTaskDetails(USER_ID, 13L))
+                .thenReturn(Optional.of(new TaskDetails(
+                        13L, "In progress task", null, TaskPriority.MEDIUM,
+                        TaskStatus.COMPLETED, null,
+                        Instant.parse("2026-07-25T10:30:00Z"),
+                        Instant.parse("2026-07-25T11:00:00Z")
+                )));
+        assertThat(sendCallback(USER_ID, "task:complete:13").getText())
+                .isEqualTo("✅ Task #13 completed.");
+    }
+
+    @Test
+    void handlesAlreadyCompletedMissingAndForeignStatusActions() throws Exception {
+        when(taskService.completeTask(USER_ID, 12L))
+                .thenReturn(TaskTransitionResult.ALREADY_COMPLETED);
+        when(taskService.getTaskDetails(USER_ID, 12L))
+                .thenReturn(Optional.of(details(TaskStatus.COMPLETED, null, false)));
+        assertThat(sendCallback(USER_ID, "task:complete:12").getText())
+                .isEqualTo("Task is already completed.");
+
+        when(taskService.startTask(USER_ID, 99L)).thenReturn(TaskTransitionResult.NOT_FOUND);
+        assertThat(sendCallback(USER_ID, "task:start:99").getText())
+                .isEqualTo(TaskmasterTelegramBot.TASK_NOT_FOUND_RESPONSE);
+        verify(taskService).startTask(USER_ID, 99L);
+    }
+
+    @Test
+    void returnsOptimisticLockMessage() throws Exception {
+        when(taskService.startTask(USER_ID, 12L))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Task.class, 12L));
+
+        assertThat(sendCallback(USER_ID, "task:start:12").getText())
+                .isEqualTo(TaskmasterTelegramBot.OPTIMISTIC_LOCK_RESPONSE);
+    }
+
+    @Test
+    void validatesMalformedTaskActionAndBackReturnsToStoredPage() throws Exception {
+        clearInvocations(telegramClient);
+        bot.consume(callbackUpdate(USER_ID, "task:view:not-a-number"));
+        assertThat(telegramClientInvocations())
+                .filteredOn(AnswerCallbackQuery.class::isInstance)
+                .extracting(method -> ((AnswerCallbackQuery) method).getText())
+                .containsExactly("Invalid action.");
+
+        when(taskService.getActiveTasks(USER_ID, 1)).thenReturn(page(1, 2, 1));
+        sendCallback(USER_ID, "tasks:page:1");
+        when(taskService.getTaskDetails(USER_ID, 101L))
+                .thenReturn(Optional.of(new TaskDetails(
+                        101L, "Task 101", null, TaskPriority.LOW, TaskStatus.TODO,
+                        null, Instant.parse("2026-07-25T10:30:00Z"), null
+                )));
+        SendMessage details = sendCallback(USER_ID, "task:view:101");
+
+        assertThat(inlineCallbacks(details)).contains("tasks:page:1");
+        sendCallback(USER_ID, "tasks:page:1");
+        verify(taskService, org.mockito.Mockito.atLeastOnce()).getActiveTasks(USER_ID, 1);
     }
 
     @Test
@@ -680,9 +850,29 @@ class TaskmasterTelegramBotTests {
         assertThat(response.getReplyMarkup()).isInstanceOf(InlineKeyboardMarkup.class);
         InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
         assertThat(keyboard.getKeyboard().getFirst().getFirst().getText())
-                .isEqualTo("🗑 Delete #" + taskId);
+                .isEqualTo("👁 Open #" + taskId);
         assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+                .isEqualTo("task:view:" + taskId);
+        assertThat(keyboard.getKeyboard().get(1).getFirst().getText())
+                .isEqualTo("🗑 Delete #" + taskId);
+        assertThat(keyboard.getKeyboard().get(1).getFirst().getCallbackData())
                 .isEqualTo("task:delete:" + taskId);
+    }
+
+    private List<String> inlineButtonTexts(SendMessage response) {
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        return keyboard.getKeyboard().stream()
+                .flatMap(List::stream)
+                .map(button -> button.getText())
+                .toList();
+    }
+
+    private List<String> inlineCallbacks(SendMessage response) {
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        return keyboard.getKeyboard().stream()
+                .flatMap(List::stream)
+                .map(button -> button.getCallbackData())
+                .toList();
     }
 
     private List<String> buttonTexts(
@@ -742,6 +932,25 @@ class TaskmasterTelegramBotTests {
             Instant deadline
     ) {
         return new TaskListItem(id, title, priority, status, deadline);
+    }
+
+    private TaskDetails details(
+            TaskStatus status,
+            String description,
+            boolean hasDeadline
+    ) {
+        return new TaskDetails(
+                12L,
+                "Buy groceries",
+                description,
+                TaskPriority.HIGH,
+                status,
+                hasDeadline ? Instant.parse("2026-12-31T14:00:00Z") : null,
+                Instant.parse("2026-07-25T10:30:00Z"),
+                status == TaskStatus.COMPLETED
+                        ? Instant.parse("2026-07-25T11:00:00Z")
+                        : null
+        );
     }
 
     private TaskPage page(int pageNumber, int totalPages, int taskCount) {

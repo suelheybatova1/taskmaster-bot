@@ -2,6 +2,7 @@ package com.github.taskmasterbot.service;
 
 import com.github.taskmasterbot.dto.CreateTaskCommand;
 import com.github.taskmasterbot.dto.TaskListItem;
+import com.github.taskmasterbot.dto.TaskDetails;
 import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.dto.TelegramUserData;
 import com.github.taskmasterbot.entity.Task;
@@ -17,6 +18,8 @@ import org.springframework.data.domain.PageRequest;
 
 import java.util.EnumSet;
 import java.util.Optional;
+import java.time.Instant;
+import java.time.Clock;
 
 @Service
 public class TaskService {
@@ -28,13 +31,16 @@ public class TaskService {
 
     private final TelegramUserRepository telegramUserRepository;
     private final TaskRepository taskRepository;
+    private final Clock clock;
 
     public TaskService(
             TelegramUserRepository telegramUserRepository,
-            TaskRepository taskRepository
+            TaskRepository taskRepository,
+            Clock clock
     ) {
         this.telegramUserRepository = telegramUserRepository;
         this.taskRepository = taskRepository;
+        this.clock = clock;
     }
 
     @Transactional
@@ -78,6 +84,45 @@ public class TaskService {
                 .map(Task::getTitle);
     }
 
+    @Transactional(readOnly = true)
+    public Optional<TaskDetails> getTaskDetails(Long telegramUserId, Long taskId) {
+        return taskRepository.findByIdAndTelegramUserTelegramUserId(taskId, telegramUserId)
+                .map(this::toDetails);
+    }
+
+    @Transactional
+    public TaskTransitionResult startTask(Long telegramUserId, Long taskId) {
+        Optional<Task> task = taskRepository.findByIdAndTelegramUserTelegramUserId(
+                taskId,
+                telegramUserId
+        );
+        if (task.isEmpty()) {
+            return TaskTransitionResult.NOT_FOUND;
+        }
+        if (task.orElseThrow().getStatus() == TaskStatus.IN_PROGRESS) {
+            return TaskTransitionResult.ALREADY_IN_PROGRESS;
+        }
+        if (!task.orElseThrow().start()) {
+            return TaskTransitionResult.ALREADY_COMPLETED;
+        }
+        return TaskTransitionResult.SUCCESS;
+    }
+
+    @Transactional
+    public TaskTransitionResult completeTask(Long telegramUserId, Long taskId) {
+        Optional<Task> task = taskRepository.findByIdAndTelegramUserTelegramUserId(
+                taskId,
+                telegramUserId
+        );
+        if (task.isEmpty()) {
+            return TaskTransitionResult.NOT_FOUND;
+        }
+        if (!task.orElseThrow().complete(Instant.now(clock))) {
+            return TaskTransitionResult.ALREADY_COMPLETED;
+        }
+        return TaskTransitionResult.SUCCESS;
+    }
+
     @Transactional
     public boolean deleteTask(Long telegramUserId, Long taskId) {
         return taskRepository.findByIdAndTelegramUserTelegramUserId(taskId, telegramUserId)
@@ -108,6 +153,19 @@ public class TaskService {
                 task.getPriority(),
                 task.getStatus(),
                 task.getDeadline()
+        );
+    }
+
+    private TaskDetails toDetails(Task task) {
+        return new TaskDetails(
+                task.getId(),
+                task.getTitle(),
+                task.getDescription(),
+                task.getPriority(),
+                task.getStatus(),
+                task.getDeadline(),
+                task.getCreatedAt(),
+                task.getCompletedAt()
         );
     }
 

@@ -12,6 +12,7 @@ import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -73,6 +74,10 @@ public class Task {
     @Column(name = "completed_at")
     private Instant completedAt;
 
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
     protected Task() {
     }
 
@@ -129,5 +134,27 @@ public class Task {
 
     public Instant getCompletedAt() {
         return completedAt;
+    }
+
+    public Long getVersion() {
+        return version;
+    }
+
+    public boolean start() {
+        if (status != TaskStatus.TODO) {
+            return false;
+        }
+        status = TaskStatus.IN_PROGRESS;
+        completedAt = null;
+        return true;
+    }
+
+    public boolean complete(Instant completionTime) {
+        if (status == TaskStatus.COMPLETED) {
+            return false;
+        }
+        status = TaskStatus.COMPLETED;
+        completedAt = completionTime;
+        return true;
     }
 }

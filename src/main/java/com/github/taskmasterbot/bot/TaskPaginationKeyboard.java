@@ -14,23 +14,34 @@ public class TaskPaginationKeyboard {
 
     private final TaskPageCallback callback;
     private final TaskDeletionCallback deletionCallback;
+    private final TaskActionCallback actionCallback;
 
     public TaskPaginationKeyboard(
             TaskPageCallback callback,
-            TaskDeletionCallback deletionCallback
+            TaskDeletionCallback deletionCallback,
+            TaskActionCallback actionCallback
     ) {
         this.callback = callback;
         this.deletionCallback = deletionCallback;
+        this.actionCallback = actionCallback;
     }
 
     public InlineKeyboardMarkup create(TaskPage taskPage) {
         List<InlineKeyboardRow> rows = new ArrayList<>();
-        taskPage.tasks().forEach(task -> rows.add(new InlineKeyboardRow(List.of(
-                InlineKeyboardButton.builder()
-                        .text("🗑 Delete #" + task.id())
-                        .callbackData(deletionCallback.request(task.id()))
-                        .build()
-        ))));
+        taskPage.tasks().forEach(task -> {
+            rows.add(new InlineKeyboardRow(List.of(
+                    InlineKeyboardButton.builder()
+                            .text("👁 Open #" + task.id())
+                            .callbackData(actionCallback.view(task.id()))
+                            .build()
+            )));
+            rows.add(new InlineKeyboardRow(List.of(
+                    InlineKeyboardButton.builder()
+                            .text("🗑 Delete #" + task.id())
+                            .callbackData(deletionCallback.request(task.id()))
+                            .build()
+            )));
+        });
 
         List<InlineKeyboardButton> buttons = new ArrayList<>(2);
         if (taskPage.hasPrevious()) {
