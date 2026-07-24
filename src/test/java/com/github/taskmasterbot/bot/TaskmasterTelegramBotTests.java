@@ -2,6 +2,10 @@ package com.github.taskmasterbot.bot;
 
 import com.github.taskmasterbot.config.ApplicationProperties;
 import com.github.taskmasterbot.config.TelegramProperties;
+import com.github.taskmasterbot.dto.CreateTaskCommand;
+import com.github.taskmasterbot.entity.Task;
+import com.github.taskmasterbot.entity.TaskPriority;
+import com.github.taskmasterbot.service.TaskService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -23,6 +27,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class TaskmasterTelegramBotTests {
 
@@ -38,11 +43,15 @@ class TaskmasterTelegramBotTests {
     @BeforeEach
     void setUp() {
         telegramClient = mock(TelegramClient.class);
+        TaskService taskService = mock(TaskService.class);
+        when(taskService.createTask(any(CreateTaskCommand.class)))
+                .thenAnswer(invocation -> savedTask(invocation.getArgument(0)));
         conversationStore = new InMemoryConversationStore();
         TaskConversationService conversationService = new TaskConversationService(
                 conversationStore,
                 new ApplicationProperties(TIME_ZONE),
-                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), TIME_ZONE)
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), TIME_ZONE),
+                taskService
         );
         bot = new TaskmasterTelegramBot(
                 new TelegramProperties("test_bot", "test-token"),
@@ -141,7 +150,7 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("tomorrow evening");
 
         assertThat(response.getText()).contains("Invalid deadline");
-        assertThat(send("/skip").getText()).startsWith("✅ Task draft created");
+        assertThat(send("/skip").getText()).startsWith("✅ Task created successfully.");
     }
 
     @Test
@@ -151,7 +160,7 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("2025-12-31 23:59");
 
         assertThat(response.getText()).contains("Deadline must be in the future");
-        assertThat(send("/skip").getText()).startsWith("✅ Task draft created");
+        assertThat(send("/skip").getText()).startsWith("✅ Task created successfully.");
     }
 
     @Test
@@ -175,11 +184,14 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("2026-01-02 12:30");
 
         assertThat(response.getText()).isEqualTo("""
-                ✅ Task draft created
+                ✅ Task created successfully.
+
+                Task ID: 42
 
                 Title: Portfolio project
-                Description: Finish the Telegram flow
+
                 Priority: HIGH
+
                 Deadline: 2026-01-02 12:30""");
         assertMainMenu(response);
         assertThat(conversationStore.isActive(USER_ID)).isFalse();
@@ -357,5 +369,13 @@ class TaskmasterTelegramBotTests {
 
     private User user(long id) {
         return new User(id, "Test User", false);
+    }
+
+    private Task savedTask(CreateTaskCommand command) {
+        Task task = mock(Task.class);
+        when(task.getId()).thenReturn(42L);
+        when(task.getTitle()).thenReturn(command.title());
+        when(task.getPriority()).thenReturn(command.priority());
+        return task;
     }
 }

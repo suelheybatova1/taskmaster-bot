@@ -1,6 +1,7 @@
 package com.github.taskmasterbot.bot;
 
 import com.github.taskmasterbot.config.TelegramProperties;
+import com.github.taskmasterbot.dto.TelegramUserData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -10,6 +11,7 @@ import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateC
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
+import org.telegram.telegrambots.meta.api.objects.User;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboard;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
@@ -128,11 +130,28 @@ public class TaskmasterTelegramBot
         }
 
         if (conversationService.isActive(userId)) {
-            sendConversationReply(chatId, conversationService.handle(userId, receivedText));
+            sendConversationReply(
+                    chatId,
+                    conversationService.handle(
+                            userId,
+                            receivedText,
+                            telegramUserData(message.getFrom(), chatId)
+                    )
+            );
             return;
         }
 
         sendMessage(chatId, DEFAULT_RESPONSE, null);
+    }
+
+    private TelegramUserData telegramUserData(User user, Long chatId) {
+        return new TelegramUserData(
+                user.getId(),
+                chatId,
+                user.getUserName(),
+                user.getFirstName(),
+                user.getLastName()
+        );
     }
 
     private void sendConversationReply(Long chatId, ConversationReply reply) {

@@ -1,5 +1,7 @@
 package com.github.taskmasterbot.bot;
 
+import com.github.taskmasterbot.entity.TaskPriority;
+
 import java.time.ZonedDateTime;
 
 public class TaskDraft {

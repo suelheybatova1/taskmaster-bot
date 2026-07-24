@@ -1,4 +1,4 @@
-package com.github.taskmasterbot.bot;
+package com.github.taskmasterbot.entity;
 
 public enum TaskPriority {
     LOW,

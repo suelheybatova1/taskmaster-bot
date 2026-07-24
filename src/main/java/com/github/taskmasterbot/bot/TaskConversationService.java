@@ -1,6 +1,11 @@
 package com.github.taskmasterbot.bot;
 
 import com.github.taskmasterbot.config.ApplicationProperties;
+import com.github.taskmasterbot.dto.CreateTaskCommand;
+import com.github.taskmasterbot.dto.TelegramUserData;
+import com.github.taskmasterbot.entity.Task;
+import com.github.taskmasterbot.entity.TaskPriority;
+import com.github.taskmasterbot.service.TaskService;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
@@ -30,15 +35,18 @@ public class TaskConversationService {
     private final InMemoryConversationStore store;
     private final ApplicationProperties properties;
     private final Clock clock;
+    private final TaskService taskService;
 
     public TaskConversationService(
             InMemoryConversationStore store,
             ApplicationProperties properties,
-            Clock clock
+            Clock clock,
+            TaskService taskService
     ) {
         this.store = store;
         this.properties = properties;
         this.clock = clock;
+        this.taskService = taskService;
     }
 
     public ConversationReply start(Long userId) {
@@ -59,7 +67,11 @@ public class TaskConversationService {
         return store.isActive(userId);
     }
 
-    public ConversationReply handle(Long userId, String input) {
+    public ConversationReply handle(
+            Long userId,
+            String input,
+            TelegramUserData telegramUser
+    ) {
         ConversationSession session = store.get(userId);
         if (session == null) {
             throw new IllegalStateException("No active conversation for Telegram user");
@@ -70,7 +82,8 @@ public class TaskConversationService {
                 case WAITING_FOR_TITLE -> handleTitle(session, input);
                 case WAITING_FOR_DESCRIPTION -> handleDescription(session, input);
                 case WAITING_FOR_PRIORITY -> handlePriority(session, input);
-                case WAITING_FOR_DEADLINE -> handleDeadline(userId, session, input);
+                case WAITING_FOR_DEADLINE ->
+                        handleDeadline(userId, session, input, telegramUser);
                 case IDLE -> throw new IllegalStateException("Idle sessions must not be stored");
             };
         }
@@ -130,7 +143,8 @@ public class TaskConversationService {
     private ConversationReply handleDeadline(
             Long userId,
             ConversationSession session,
-            String input
+            String input,
+            TelegramUserData telegramUser
     ) {
         String normalizedInput = input.trim();
         if (!"/skip".equals(normalizedInput)) {
@@ -156,28 +170,41 @@ public class TaskConversationService {
             session.getDraft().setDeadline(deadline);
         }
 
-        String summary = createSummary(session.getDraft());
+        Task savedTask = saveTask(session.getDraft(), telegramUser);
+        String summary = createSummary(savedTask, session.getDraft());
         store.clear(userId);
         return ConversationReply.mainMenu(summary);
     }
 
-    private String createSummary(TaskDraft draft) {
-        String description = draft.getDescription() == null ? "—" : draft.getDescription();
+    private Task saveTask(TaskDraft draft, TelegramUserData telegramUser) {
+        return taskService.createTask(new CreateTaskCommand(
+                telegramUser,
+                draft.getTitle(),
+                draft.getDescription(),
+                draft.getPriority(),
+                draft.getDeadline() == null ? null : draft.getDeadline().toInstant()
+        ));
+    }
+
+    private String createSummary(Task savedTask, TaskDraft draft) {
         String deadline = draft.getDeadline() == null
                 ? "—"
                 : DEADLINE_FORMATTER.format(draft.getDeadline());
 
         return """
-                ✅ Task draft created
+                ✅ Task created successfully.
+
+                Task ID: %s
 
                 Title: %s
-                Description: %s
+
                 Priority: %s
+
                 Deadline: %s"""
                 .formatted(
-                        draft.getTitle(),
-                        description,
-                        draft.getPriority(),
+                        savedTask.getId(),
+                        savedTask.getTitle(),
+                        savedTask.getPriority(),
                         deadline
                 );
     }
