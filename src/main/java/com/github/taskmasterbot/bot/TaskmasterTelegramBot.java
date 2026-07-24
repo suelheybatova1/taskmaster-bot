@@ -10,6 +10,8 @@ import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateC
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboard;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
@@ -26,21 +28,34 @@ public class TaskmasterTelegramBot
             Available commands:
 
             /start
-            /help""";
+            /help
+            /cancel""";
 
     static final String DEFAULT_RESPONSE = "TaskMaster Bot is connected.";
+    static final String MY_TASKS_RESPONSE = "Task list will be added in the next phase.";
+    static final String STATISTICS_RESPONSE = "Statistics will be added later.";
+    static final String SETTINGS_RESPONSE = "Settings will be added later.";
 
     private static final Logger log = LoggerFactory.getLogger(TaskmasterTelegramBot.class);
 
     private final TelegramProperties properties;
     private final TelegramClient telegramClient;
+    private final MainMenuKeyboard mainMenuKeyboard;
+    private final PriorityKeyboard priorityKeyboard;
+    private final TaskConversationService conversationService;
 
     public TaskmasterTelegramBot(
             TelegramProperties properties,
-            TelegramClient telegramClient
+            TelegramClient telegramClient,
+            MainMenuKeyboard mainMenuKeyboard,
+            PriorityKeyboard priorityKeyboard,
+            TaskConversationService conversationService
     ) {
         this.properties = properties;
         this.telegramClient = telegramClient;
+        this.mainMenuKeyboard = mainMenuKeyboard;
+        this.priorityKeyboard = priorityKeyboard;
+        this.conversationService = conversationService;
     }
 
     @Override
@@ -67,6 +82,9 @@ public class TaskmasterTelegramBot
         String receivedText = message.getText();
         Long userId = message.getFrom() == null ? null : message.getFrom().getId();
         Long chatId = message.getChatId();
+        if (userId == null) {
+            return;
+        }
 
         log.info(
                 "Received Telegram message: userId={}, chatId={}, text={}",
@@ -75,23 +93,69 @@ public class TaskmasterTelegramBot
                 receivedText
         );
 
-        String responseText = switch (receivedText.trim()) {
-            case "/start" -> START_RESPONSE;
-            case "/help" -> HELP_RESPONSE;
-            default -> DEFAULT_RESPONSE;
-        };
+        String normalizedText = receivedText.trim();
+        if ("/start".equals(normalizedText)) {
+            conversationService.reset(userId);
+            sendMessage(chatId, START_RESPONSE, mainMenuKeyboard.create());
+            return;
+        }
 
-        sendMessage(chatId, responseText);
+        if ("/cancel".equals(normalizedText)) {
+            sendConversationReply(chatId, conversationService.cancel(userId));
+            return;
+        }
+
+        if ("/help".equals(normalizedText)) {
+            sendMessage(chatId, HELP_RESPONSE, null);
+            return;
+        }
+
+        if (MainMenuKeyboard.ADD_TASK_BUTTON.equals(normalizedText)) {
+            sendConversationReply(chatId, conversationService.start(userId));
+            return;
+        }
+
+        String menuResponse = switch (normalizedText) {
+            case MainMenuKeyboard.MY_TASKS_BUTTON -> MY_TASKS_RESPONSE;
+            case MainMenuKeyboard.STATISTICS_BUTTON -> STATISTICS_RESPONSE;
+            case MainMenuKeyboard.SETTINGS_BUTTON -> SETTINGS_RESPONSE;
+            default -> null;
+        };
+        if (menuResponse != null) {
+            conversationService.reset(userId);
+            sendMessage(chatId, menuResponse, mainMenuKeyboard.create());
+            return;
+        }
+
+        if (conversationService.isActive(userId)) {
+            sendConversationReply(chatId, conversationService.handle(userId, receivedText));
+            return;
+        }
+
+        sendMessage(chatId, DEFAULT_RESPONSE, null);
     }
 
-    private void sendMessage(Long chatId, String text) {
-        SendMessage response = SendMessage.builder()
+    private void sendConversationReply(Long chatId, ConversationReply reply) {
+        ReplyKeyboard keyboard = switch (reply.keyboardType()) {
+            case MAIN_MENU -> mainMenuKeyboard.create();
+            case PRIORITY -> priorityKeyboard.create();
+            case REMOVE -> ReplyKeyboardRemove.builder().removeKeyboard(true).build();
+            case NONE -> null;
+        };
+        sendMessage(chatId, reply.text(), keyboard);
+    }
+
+    private void sendMessage(Long chatId, String text, ReplyKeyboard replyKeyboard) {
+        SendMessage.SendMessageBuilder<?, ?> responseBuilder = SendMessage.builder()
                 .chatId(chatId)
-                .text(text)
-                .build();
+                .text(text);
+
+        if (replyKeyboard != null) {
+            responseBuilder.replyMarkup(replyKeyboard);
+        }
 
         try {
-            telegramClient.execute(response);
+            telegramClient.execute(responseBuilder.build());
         } catch (TelegramApiException exception) {
             log.error(
                     "Failed to send Telegram message: chatId={}, errorType={}",

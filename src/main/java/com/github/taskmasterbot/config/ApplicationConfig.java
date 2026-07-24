@@ -6,12 +6,19 @@ import org.springframework.context.annotation.Configuration;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+import java.time.Clock;
+
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(TelegramProperties.class)
+@EnableConfigurationProperties({TelegramProperties.class, ApplicationProperties.class})
 public class ApplicationConfig {
 
     @Bean
     TelegramClient telegramClient(TelegramProperties properties) {
         return new OkHttpTelegramClient(properties.token());
+    }
+
+    @Bean
+    Clock applicationClock(ApplicationProperties properties) {
+        return Clock.system(properties.timeZone());
     }
 }

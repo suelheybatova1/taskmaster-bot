@@ -25,6 +25,9 @@ telegram:
     username: ${TELEGRAM_BOT_USERNAME:}
     token: ${TELEGRAM_BOT_TOKEN:}
 
+application:
+  time-zone: ${APP_TIME_ZONE:Asia/Baku}
+
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
