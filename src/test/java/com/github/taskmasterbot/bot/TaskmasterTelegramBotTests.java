@@ -3,17 +3,23 @@ package com.github.taskmasterbot.bot;
 import com.github.taskmasterbot.config.ApplicationProperties;
 import com.github.taskmasterbot.config.TelegramProperties;
 import com.github.taskmasterbot.dto.CreateTaskCommand;
+import com.github.taskmasterbot.dto.TaskListItem;
+import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.entity.Task;
 import com.github.taskmasterbot.entity.TaskPriority;
+import com.github.taskmasterbot.entity.TaskStatus;
 import com.github.taskmasterbot.service.TaskService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.User;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
 import java.time.Clock;
@@ -23,6 +29,8 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -39,13 +47,16 @@ class TaskmasterTelegramBotTests {
     private TelegramClient telegramClient;
     private TaskmasterTelegramBot bot;
     private InMemoryConversationStore conversationStore;
+    private TaskService taskService;
 
     @BeforeEach
     void setUp() {
         telegramClient = mock(TelegramClient.class);
-        TaskService taskService = mock(TaskService.class);
+        taskService = mock(TaskService.class);
         when(taskService.createTask(any(CreateTaskCommand.class)))
                 .thenAnswer(invocation -> savedTask(invocation.getArgument(0)));
+        when(taskService.getActiveTasks(anyLong(), anyInt()))
+                .thenReturn(new TaskPage(List.of(), 0, 0));
         conversationStore = new InMemoryConversationStore();
         TaskConversationService conversationService = new TaskConversationService(
                 conversationStore,
@@ -58,7 +69,11 @@ class TaskmasterTelegramBotTests {
                 telegramClient,
                 new MainMenuKeyboard(),
                 new PriorityKeyboard(),
-                conversationService
+                conversationService,
+                taskService,
+                new TaskListFormatter(new ApplicationProperties(TIME_ZONE)),
+                new TaskPaginationKeyboard(new TaskPageCallback()),
+                new TaskPageCallback()
         );
     }
 
@@ -227,11 +242,135 @@ class TaskmasterTelegramBotTests {
     void menuSelectionCancelsActiveFlowBeforeHandlingSelection() throws Exception {
         advanceToDescription();
 
-        SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
+        SendMessage response = send(MainMenuKeyboard.STATISTICS_BUTTON);
 
-        assertThat(response.getText()).isEqualTo(TaskmasterTelegramBot.MY_TASKS_RESPONSE);
+        assertThat(response.getText()).isEqualTo(TaskmasterTelegramBot.STATISTICS_RESPONSE);
         assertMainMenu(response);
         assertThat(conversationStore.isActive(USER_ID)).isFalse();
+    }
+
+    @Test
+    void displaysEmptyTaskMessage() throws Exception {
+        SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
+
+        assertThat(response.getText()).isEqualTo(TaskListFormatter.EMPTY_TASKS_MESSAGE);
+        assertThat(response.getReplyMarkup()).isNull();
+        verify(taskService).getActiveTasks(USER_ID, 0);
+    }
+
+    @Test
+    void displaysOneActiveTask() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 0)).thenReturn(new TaskPage(
+                List.of(taskItem(
+                        12L,
+                        "Buy groceries",
+                        TaskPriority.HIGH,
+                        TaskStatus.TODO,
+                        Instant.parse("2026-12-31T14:00:00Z")
+                )),
+                0,
+                1
+        ));
+
+        SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
+
+        assertThat(response.getText()).isEqualTo("""
+                #12 — Buy groceries
+                Priority: 🔴 High
+                Status: 📝 Todo
+                Deadline: 2026-12-31 18:00""");
+        assertThat(response.getReplyMarkup()).isNull();
+    }
+
+    @Test
+    void displaysMultipleTasksAndNoDeadlineLabel() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 0)).thenReturn(new TaskPage(
+                List.of(
+                        taskItem(
+                                1L,
+                                "First",
+                                TaskPriority.LOW,
+                                TaskStatus.IN_PROGRESS,
+                                Instant.parse("2026-05-01T08:00:00Z")
+                        ),
+                        taskItem(
+                                2L,
+                                "Second",
+                                TaskPriority.MEDIUM,
+                                TaskStatus.TODO,
+                                null
+                        )
+                ),
+                0,
+                1
+        ));
+
+        SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
+
+        assertThat(response.getText())
+                .contains("#1 — First", "🚧 In progress", "#2 — Second", "Deadline: No deadline");
+    }
+
+    @Test
+    void addsNextButtonWhenAnotherPageExists() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 0)).thenReturn(page(0, 2, 10));
+
+        SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
+
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        assertThat(keyboard.getKeyboard()).hasSize(1);
+        assertThat(keyboard.getKeyboard().getFirst()).hasSize(1);
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getText()).isEqualTo("Next ▶");
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+                .isEqualTo("tasks:page:1");
+    }
+
+    @Test
+    void handlesNextPageCallbackForCallbackUser() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 1)).thenReturn(page(1, 2, 1));
+
+        SendMessage response = sendCallback(USER_ID, "tasks:page:1");
+
+        verify(taskService).getActiveTasks(USER_ID, 1);
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getText())
+                .isEqualTo("◀ Previous");
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+                .isEqualTo("tasks:page:0");
+    }
+
+    @Test
+    void handlesPreviousPageCallback() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 0)).thenReturn(page(0, 2, 10));
+
+        sendCallback(USER_ID, "tasks:page:0");
+
+        verify(taskService).getActiveTasks(USER_ID, 0);
+    }
+
+    @Test
+    void ignoresMalformedTaskCallbackSafely() throws Exception {
+        clearInvocations(telegramClient);
+
+        bot.consume(callbackUpdate(USER_ID, "tasks:page:not-a-number"));
+
+        verify(taskService, never()).getActiveTasks(anyLong(), anyInt());
+        List<Object> sentMethods = telegramClientInvocations();
+        assertThat(sentMethods).hasSize(1);
+        assertThat(sentMethods.getFirst()).isInstanceOf(AnswerCallbackQuery.class);
+        assertThat(((AnswerCallbackQuery) sentMethods.getFirst()).getText())
+                .isEqualTo("Invalid task page.");
+    }
+
+    @Test
+    void displaysNearestPageReturnedForOutOfRangeCallback() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 999))
+                .thenReturn(page(1, 2, 1));
+
+        SendMessage response = sendCallback(USER_ID, "tasks:page:999");
+
+        verify(taskService).getActiveTasks(USER_ID, 999);
+        assertThat(response.getText()).contains("#101 — Task 101");
     }
 
     @Test
@@ -323,6 +462,25 @@ class TaskmasterTelegramBotTests {
         return captor.getValue();
     }
 
+    private SendMessage sendCallback(long userId, String callbackData) throws Exception {
+        clearInvocations(telegramClient);
+        bot.consume(callbackUpdate(userId, callbackData));
+
+        return telegramClientInvocations().stream()
+                .filter(SendMessage.class::isInstance)
+                .map(SendMessage.class::cast)
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private List<Object> telegramClientInvocations() {
+        return org.mockito.Mockito.mockingDetails(telegramClient)
+                .getInvocations()
+                .stream()
+                .map(invocation -> invocation.getArgument(0))
+                .toList();
+    }
+
     private void assertPriorityResponse(SendMessage response) {
         assertThat(response.getText()).isEqualTo(TaskConversationService.PRIORITY_PROMPT);
         assertPriorityKeyboard(response);
@@ -363,6 +521,22 @@ class TaskmasterTelegramBotTests {
         return update;
     }
 
+    private Update callbackUpdate(long userId, String callbackData) {
+        Message message = new Message();
+        message.setMessageId(50);
+        message.setChat(chat(CHAT_ID));
+
+        CallbackQuery callbackQuery = new CallbackQuery();
+        callbackQuery.setId("callback-id");
+        callbackQuery.setFrom(user(userId));
+        callbackQuery.setMessage(message);
+        callbackQuery.setData(callbackData);
+
+        Update update = new Update();
+        update.setCallbackQuery(callbackQuery);
+        return update;
+    }
+
     private org.telegram.telegrambots.meta.api.objects.chat.Chat chat(long id) {
         return new org.telegram.telegrambots.meta.api.objects.chat.Chat(id, "private");
     }
@@ -377,5 +551,28 @@ class TaskmasterTelegramBotTests {
         when(task.getTitle()).thenReturn(command.title());
         when(task.getPriority()).thenReturn(command.priority());
         return task;
+    }
+
+    private TaskListItem taskItem(
+            Long id,
+            String title,
+            TaskPriority priority,
+            TaskStatus status,
+            Instant deadline
+    ) {
+        return new TaskListItem(id, title, priority, status, deadline);
+    }
+
+    private TaskPage page(int pageNumber, int totalPages, int taskCount) {
+        List<TaskListItem> tasks = java.util.stream.IntStream.range(0, taskCount)
+                .mapToObj(index -> taskItem(
+                        (long) (pageNumber * 100 + index + 1),
+                        "Task " + (pageNumber * 100 + index + 1),
+                        TaskPriority.LOW,
+                        TaskStatus.TODO,
+                        null
+                ))
+                .toList();
+        return new TaskPage(tasks, pageNumber, totalPages);
     }
 }

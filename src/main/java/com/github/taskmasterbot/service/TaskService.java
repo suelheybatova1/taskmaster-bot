@@ -1,16 +1,29 @@
 package com.github.taskmasterbot.service;
 
 import com.github.taskmasterbot.dto.CreateTaskCommand;
+import com.github.taskmasterbot.dto.TaskListItem;
+import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.dto.TelegramUserData;
 import com.github.taskmasterbot.entity.Task;
+import com.github.taskmasterbot.entity.TaskStatus;
 import com.github.taskmasterbot.entity.TelegramUser;
 import com.github.taskmasterbot.repository.TaskRepository;
 import com.github.taskmasterbot.repository.TelegramUserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+
+import java.util.EnumSet;
+
 @Service
 public class TaskService {
+
+    public static final int TASKS_PER_PAGE = 10;
+
+    private static final EnumSet<TaskStatus> ACTIVE_STATUSES =
+            EnumSet.of(TaskStatus.TODO, TaskStatus.IN_PROGRESS);
 
     private final TelegramUserRepository telegramUserRepository;
     private final TaskRepository taskRepository;
@@ -34,6 +47,45 @@ public class TaskService {
                 command.deadline()
         );
         return taskRepository.save(task);
+    }
+
+    @Transactional(readOnly = true)
+    public TaskPage getActiveTasks(Long telegramUserId, int requestedPage) {
+        int safePage = Math.max(requestedPage, 0);
+        Page<Task> result = queryActiveTasks(telegramUserId, safePage);
+
+        if (result.getTotalPages() == 0) {
+            safePage = 0;
+        } else if (safePage >= result.getTotalPages()) {
+            safePage = result.getTotalPages() - 1;
+            result = queryActiveTasks(telegramUserId, safePage);
+        }
+
+        return new TaskPage(
+                result.getContent().stream()
+                        .map(this::toListItem)
+                        .toList(),
+                safePage,
+                result.getTotalPages()
+        );
+    }
+
+    private Page<Task> queryActiveTasks(Long telegramUserId, int page) {
+        return taskRepository.findActiveTasks(
+                telegramUserId,
+                ACTIVE_STATUSES,
+                PageRequest.of(page, TASKS_PER_PAGE)
+        );
+    }
+
+    private TaskListItem toListItem(Task task) {
+        return new TaskListItem(
+                task.getId(),
+                task.getTitle(),
+                task.getPriority(),
+                task.getStatus(),
+                task.getDeadline()
+        );
     }
 
     private TelegramUser findOrCreateUser(TelegramUserData data) {

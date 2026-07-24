@@ -1,7 +1,9 @@
 package com.github.taskmasterbot.bot;
 
 import com.github.taskmasterbot.config.TelegramProperties;
+import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.dto.TelegramUserData;
+import com.github.taskmasterbot.service.TaskService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -9,6 +11,8 @@ import org.telegram.telegrambots.longpolling.interfaces.LongPollingUpdateConsume
 import org.telegram.telegrambots.longpolling.starter.SpringLongPollingBot;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.User;
@@ -34,7 +38,6 @@ public class TaskmasterTelegramBot
             /cancel""";
 
     static final String DEFAULT_RESPONSE = "TaskMaster Bot is connected.";
-    static final String MY_TASKS_RESPONSE = "Task list will be added in the next phase.";
     static final String STATISTICS_RESPONSE = "Statistics will be added later.";
     static final String SETTINGS_RESPONSE = "Settings will be added later.";
 
@@ -45,19 +48,31 @@ public class TaskmasterTelegramBot
     private final MainMenuKeyboard mainMenuKeyboard;
     private final PriorityKeyboard priorityKeyboard;
     private final TaskConversationService conversationService;
+    private final TaskService taskService;
+    private final TaskListFormatter taskListFormatter;
+    private final TaskPaginationKeyboard taskPaginationKeyboard;
+    private final TaskPageCallback taskPageCallback;
 
     public TaskmasterTelegramBot(
             TelegramProperties properties,
             TelegramClient telegramClient,
             MainMenuKeyboard mainMenuKeyboard,
             PriorityKeyboard priorityKeyboard,
-            TaskConversationService conversationService
+            TaskConversationService conversationService,
+            TaskService taskService,
+            TaskListFormatter taskListFormatter,
+            TaskPaginationKeyboard taskPaginationKeyboard,
+            TaskPageCallback taskPageCallback
     ) {
         this.properties = properties;
         this.telegramClient = telegramClient;
         this.mainMenuKeyboard = mainMenuKeyboard;
         this.priorityKeyboard = priorityKeyboard;
         this.conversationService = conversationService;
+        this.taskService = taskService;
+        this.taskListFormatter = taskListFormatter;
+        this.taskPaginationKeyboard = taskPaginationKeyboard;
+        this.taskPageCallback = taskPageCallback;
     }
 
     @Override
@@ -76,7 +91,14 @@ public class TaskmasterTelegramBot
 
     @Override
     public void consume(Update update) {
-        if (update == null || !update.hasMessage() || !update.getMessage().hasText()) {
+        if (update == null) {
+            return;
+        }
+        if (update.hasCallbackQuery()) {
+            consumeCallback(update.getCallbackQuery());
+            return;
+        }
+        if (!update.hasMessage() || !update.getMessage().hasText()) {
             return;
         }
 
@@ -117,8 +139,13 @@ public class TaskmasterTelegramBot
             return;
         }
 
+        if (MainMenuKeyboard.MY_TASKS_BUTTON.equals(normalizedText)) {
+            conversationService.reset(userId);
+            sendTasksPage(chatId, userId, 0);
+            return;
+        }
+
         String menuResponse = switch (normalizedText) {
-            case MainMenuKeyboard.MY_TASKS_BUTTON -> MY_TASKS_RESPONSE;
             case MainMenuKeyboard.STATISTICS_BUTTON -> STATISTICS_RESPONSE;
             case MainMenuKeyboard.SETTINGS_BUTTON -> SETTINGS_RESPONSE;
             default -> null;
@@ -142,6 +169,60 @@ public class TaskmasterTelegramBot
         }
 
         sendMessage(chatId, DEFAULT_RESPONSE, null);
+    }
+
+    private void consumeCallback(CallbackQuery callbackQuery) {
+        if (callbackQuery == null || callbackQuery.getFrom() == null) {
+            return;
+        }
+
+        var requestedPage = taskPageCallback.parse(callbackQuery.getData());
+        if (requestedPage.isEmpty() || callbackQuery.getMessage() == null) {
+            answerCallback(callbackQuery.getId(), "Invalid task page.");
+            return;
+        }
+
+        Long userId = callbackQuery.getFrom().getId();
+        Long chatId = callbackQuery.getMessage().getChatId();
+        log.info(
+                "Received Telegram callback: userId={}, chatId={}, data={}",
+                userId,
+                chatId,
+                callbackQuery.getData()
+        );
+
+        answerCallback(callbackQuery.getId(), null);
+        sendTasksPage(chatId, userId, requestedPage.getAsInt());
+    }
+
+    private void sendTasksPage(Long chatId, Long telegramUserId, int requestedPage) {
+        TaskPage taskPage = taskService.getActiveTasks(telegramUserId, requestedPage);
+        sendMessage(
+                chatId,
+                taskListFormatter.format(taskPage),
+                taskPaginationKeyboard.create(taskPage)
+        );
+    }
+
+    private void answerCallback(String callbackQueryId, String text) {
+        if (callbackQueryId == null) {
+            return;
+        }
+
+        AnswerCallbackQuery.AnswerCallbackQueryBuilder<?, ?> builder =
+                AnswerCallbackQuery.builder().callbackQueryId(callbackQueryId);
+        if (text != null) {
+            builder.text(text);
+        }
+
+        try {
+            telegramClient.execute(builder.build());
+        } catch (TelegramApiException exception) {
+            log.error(
+                    "Failed to answer Telegram callback: errorType={}",
+                    exception.getClass().getSimpleName()
+            );
+        }
     }
 
     private TelegramUserData telegramUserData(User user, Long chatId) {
