@@ -1,0 +1,26 @@
+# Build output
+target/
+
+# Environment and secrets
+.env
+!.env.example
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+
+# Maven
+.mvn/timing.properties
