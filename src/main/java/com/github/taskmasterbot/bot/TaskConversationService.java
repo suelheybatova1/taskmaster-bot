@@ -188,24 +188,29 @@ public class TaskConversationService {
 
     private String createSummary(Task savedTask, TaskDraft draft) {
         String deadline = draft.getDeadline() == null
-                ? "—"
+                ? "No deadline"
                 : DEADLINE_FORMATTER.format(draft.getDeadline());
 
         return """
-                ✅ Task created successfully.
+                ✅ Task created!
 
-                Task ID: %s
+                📝 %s
+                %s
+                📅 %s
 
-                Title: %s
-
-                Priority: %s
-
-                Deadline: %s"""
+                Use 📋 My tasks to view it."""
                 .formatted(
-                        savedTask.getId(),
                         savedTask.getTitle(),
-                        savedTask.getPriority(),
+                        formatPriority(savedTask.getPriority()),
                         deadline
                 );
+    }
+
+    private String formatPriority(TaskPriority priority) {
+        return switch (priority) {
+            case LOW -> "🟢 Low";
+            case MEDIUM -> "🟡 Medium";
+            case HIGH -> "🔴 High";
+        };
     }
 }

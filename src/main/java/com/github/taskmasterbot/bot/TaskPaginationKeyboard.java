@@ -13,12 +13,25 @@ import java.util.List;
 public class TaskPaginationKeyboard {
 
     private final TaskPageCallback callback;
+    private final TaskDeletionCallback deletionCallback;
 
-    public TaskPaginationKeyboard(TaskPageCallback callback) {
+    public TaskPaginationKeyboard(
+            TaskPageCallback callback,
+            TaskDeletionCallback deletionCallback
+    ) {
         this.callback = callback;
+        this.deletionCallback = deletionCallback;
     }
 
     public InlineKeyboardMarkup create(TaskPage taskPage) {
+        List<InlineKeyboardRow> rows = new ArrayList<>();
+        taskPage.tasks().forEach(task -> rows.add(new InlineKeyboardRow(List.of(
+                InlineKeyboardButton.builder()
+                        .text("🗑 Delete #" + task.id())
+                        .callbackData(deletionCallback.request(task.id()))
+                        .build()
+        ))));
+
         List<InlineKeyboardButton> buttons = new ArrayList<>(2);
         if (taskPage.hasPrevious()) {
             buttons.add(button("◀ Previous", taskPage.pageNumber() - 1));
@@ -27,12 +40,16 @@ public class TaskPaginationKeyboard {
             buttons.add(button("Next ▶", taskPage.pageNumber() + 1));
         }
 
-        if (buttons.isEmpty()) {
+        if (!buttons.isEmpty()) {
+            rows.add(new InlineKeyboardRow(buttons));
+        }
+
+        if (rows.isEmpty()) {
             return null;
         }
 
         return InlineKeyboardMarkup.builder()
-                .keyboard(List.of(new InlineKeyboardRow(buttons)))
+                .keyboard(rows)
                 .build();
     }
 

@@ -235,6 +235,7 @@ class TaskServiceIntegrationIT {
         assertThat(result.tasks())
                 .extracting(item -> item.title())
                 .doesNotContain("Completed task", "Another user's task");
+        assertThat(result.totalTasks()).isEqualTo(2);
     }
 
     @Test
@@ -301,15 +302,18 @@ class TaskServiceIntegrationIT {
         assertThat(firstPage.tasks()).hasSize(10);
         assertThat(firstPage.pageNumber()).isZero();
         assertThat(firstPage.totalPages()).isEqualTo(2);
+        assertThat(firstPage.totalTasks()).isEqualTo(12);
         assertThat(firstPage.hasPrevious()).isFalse();
         assertThat(firstPage.hasNext()).isTrue();
 
         assertThat(secondPage.tasks()).hasSize(2);
         assertThat(secondPage.pageNumber()).isEqualTo(1);
+        assertThat(secondPage.totalTasks()).isEqualTo(12);
         assertThat(secondPage.hasPrevious()).isTrue();
         assertThat(secondPage.hasNext()).isFalse();
 
         assertThat(clampedPage.pageNumber()).isEqualTo(1);
+        assertThat(clampedPage.totalTasks()).isEqualTo(12);
         assertThat(clampedPage.tasks())
                 .extracting(item -> item.id())
                 .containsExactlyElementsOf(
@@ -324,6 +328,85 @@ class TaskServiceIntegrationIT {
         assertThat(result.tasks()).isEmpty();
         assertThat(result.pageNumber()).isZero();
         assertThat(result.totalPages()).isZero();
+        assertThat(result.totalTasks()).isZero();
+    }
+
+    @Test
+    void deletesOnlyTaskOwnedByRequestingTelegramUser() {
+        Task owned = taskService.createTask(command(
+                2301L, 3301L, null, "Owned task", null,
+                TaskPriority.MEDIUM, null
+        ));
+        Task otherUsersTask = taskService.createTask(command(
+                2302L, 3302L, null, "Other task", null,
+                TaskPriority.HIGH, null
+        ));
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(taskService.findOwnedTaskTitle(2301L, owned.getId()))
+                .contains("Owned task");
+        assertThat(taskService.findOwnedTaskTitle(2301L, otherUsersTask.getId()))
+                .isEmpty();
+        assertThat(taskService.deleteTask(2301L, otherUsersTask.getId())).isFalse();
+        assertThat(taskService.deleteTask(2301L, owned.getId())).isTrue();
+        assertThat(taskService.deleteTask(2301L, owned.getId())).isFalse();
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(taskRepository.findById(owned.getId())).isEmpty();
+        assertThat(taskRepository.findById(otherUsersTask.getId())).isPresent();
+        assertThat(taskService.getActiveTasks(2301L, 0).tasks()).isEmpty();
+    }
+
+    @Test
+    void bulkDeletesAllStatusesForOwnerButPreservesOtherUserAndTelegramUser() {
+        Task todo = taskService.createTask(command(
+                2401L, 3401L, null, "Todo", null,
+                TaskPriority.LOW, null
+        ));
+        Task inProgress = taskService.createTask(command(
+                2401L, 3401L, null, "In progress", null,
+                TaskPriority.MEDIUM, null
+        ));
+        Task completed = taskService.createTask(command(
+                2401L, 3401L, null, "Completed", null,
+                TaskPriority.HIGH, null
+        ));
+        Task otherUsersTask = taskService.createTask(command(
+                2402L, 3402L, null, "Other user's task", null,
+                TaskPriority.HIGH, null
+        ));
+        entityManager.flush();
+        jdbcTemplate.update(
+                "UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?",
+                inProgress.getId()
+        );
+        jdbcTemplate.update(
+                "UPDATE tasks SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP "
+                        + "WHERE id = ?",
+                completed.getId()
+        );
+        entityManager.clear();
+
+        int deleted = taskService.deleteAllTasks(2401L);
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(deleted).isEqualTo(3);
+        assertThat(taskRepository.findAllByTelegramUserTelegramUserIdOrderByCreatedAtDesc(2401L))
+                .isEmpty();
+        assertThat(taskRepository.findById(otherUsersTask.getId())).isPresent();
+        assertThat(telegramUserRepository.findByTelegramUserId(2401L)).isPresent();
+        assertThat(telegramUserRepository.findByTelegramUserId(2402L)).isPresent();
+        assertThat(taskRepository.findAllById(
+                List.of(todo.getId(), inProgress.getId(), completed.getId())
+        )).isEmpty();
+    }
+
+    @Test
+    void bulkDeleteReturnsZeroForUserWithoutTasks() {
+        assertThat(taskService.deleteAllTasks(999999L)).isZero();
     }
 
     private CreateTaskCommand command(

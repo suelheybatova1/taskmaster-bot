@@ -26,6 +26,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -56,7 +57,7 @@ class TaskmasterTelegramBotTests {
         when(taskService.createTask(any(CreateTaskCommand.class)))
                 .thenAnswer(invocation -> savedTask(invocation.getArgument(0)));
         when(taskService.getActiveTasks(anyLong(), anyInt()))
-                .thenReturn(new TaskPage(List.of(), 0, 0));
+                .thenReturn(new TaskPage(List.of(), 0, 0, 0));
         conversationStore = new InMemoryConversationStore();
         TaskConversationService conversationService = new TaskConversationService(
                 conversationStore,
@@ -64,6 +65,8 @@ class TaskmasterTelegramBotTests {
                 Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), TIME_ZONE),
                 taskService
         );
+        TaskPageCallback pageCallback = new TaskPageCallback();
+        TaskDeletionCallback deletionCallback = new TaskDeletionCallback();
         bot = new TaskmasterTelegramBot(
                 new TelegramProperties("test_bot", "test-token"),
                 telegramClient,
@@ -72,8 +75,10 @@ class TaskmasterTelegramBotTests {
                 conversationService,
                 taskService,
                 new TaskListFormatter(new ApplicationProperties(TIME_ZONE)),
-                new TaskPaginationKeyboard(new TaskPageCallback()),
-                new TaskPageCallback()
+                new TaskPaginationKeyboard(pageCallback, deletionCallback),
+                pageCallback,
+                deletionCallback,
+                new TaskDeletionKeyboard(deletionCallback)
         );
     }
 
@@ -165,7 +170,7 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("tomorrow evening");
 
         assertThat(response.getText()).contains("Invalid deadline");
-        assertThat(send("/skip").getText()).startsWith("✅ Task created successfully.");
+        assertThat(send("/skip").getText()).startsWith("✅ Task created!");
     }
 
     @Test
@@ -175,7 +180,7 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("2025-12-31 23:59");
 
         assertThat(response.getText()).contains("Deadline must be in the future");
-        assertThat(send("/skip").getText()).startsWith("✅ Task created successfully.");
+        assertThat(send("/skip").getText()).startsWith("✅ Task created!");
     }
 
     @Test
@@ -184,7 +189,9 @@ class TaskmasterTelegramBotTests {
 
         SendMessage response = send("/skip");
 
-        assertThat(response.getText()).contains("Deadline: —");
+        assertThat(response.getText())
+                .contains("📅 No deadline")
+                .doesNotContain("Task ID:");
         assertMainMenu(response);
         assertThat(conversationStore.isActive(USER_ID)).isFalse();
     }
@@ -199,15 +206,14 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send("2026-01-02 12:30");
 
         assertThat(response.getText()).isEqualTo("""
-                ✅ Task created successfully.
+                ✅ Task created!
 
-                Task ID: 42
+                📝 Portfolio project
+                🔴 High
+                📅 2026-01-02 12:30
 
-                Title: Portfolio project
-
-                Priority: HIGH
-
-                Deadline: 2026-01-02 12:30""");
+                Use 📋 My tasks to view it.""");
+        assertThat(response.getText()).doesNotContain("Task ID:");
         assertMainMenu(response);
         assertThat(conversationStore.isActive(USER_ID)).isFalse();
     }
@@ -269,17 +275,20 @@ class TaskmasterTelegramBotTests {
                         Instant.parse("2026-12-31T14:00:00Z")
                 )),
                 0,
+                1,
                 1
         ));
 
         SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
 
         assertThat(response.getText()).isEqualTo("""
-                #12 — Buy groceries
-                Priority: 🔴 High
-                Status: 📝 Todo
-                Deadline: 2026-12-31 18:00""");
-        assertThat(response.getReplyMarkup()).isNull();
+                📋 Active tasks: 1
+                Page 1/1
+
+                📝 #12 | Buy groceries
+                🔴 High
+                📅 2026-12-31 18:00""");
+        assertDeleteButton(response, 12L);
     }
 
     @Test
@@ -302,13 +311,27 @@ class TaskmasterTelegramBotTests {
                         )
                 ),
                 0,
-                1
+                1,
+                2
         ));
 
         SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
 
         assertThat(response.getText())
-                .contains("#1 — First", "🚧 In progress", "#2 — Second", "Deadline: No deadline");
+                .isEqualTo("""
+                        📋 Active tasks: 2
+                        Page 1/1
+
+                        🚧 #1 | First
+                        🟢 Low
+                        📅 2026-05-01 12:00
+
+                        ────────────
+
+                        📝 #2 | Second
+                        🟡 Medium
+                        📅 No deadline""")
+                .doesNotContain("Priority:", "Status:", "Deadline:");
     }
 
     @Test
@@ -318,10 +341,10 @@ class TaskmasterTelegramBotTests {
         SendMessage response = send(MainMenuKeyboard.MY_TASKS_BUTTON);
 
         InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
-        assertThat(keyboard.getKeyboard()).hasSize(1);
-        assertThat(keyboard.getKeyboard().getFirst()).hasSize(1);
-        assertThat(keyboard.getKeyboard().getFirst().getFirst().getText()).isEqualTo("Next ▶");
-        assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+        assertThat(keyboard.getKeyboard()).hasSize(11);
+        assertThat(keyboard.getKeyboard().getLast()).hasSize(1);
+        assertThat(keyboard.getKeyboard().getLast().getFirst().getText()).isEqualTo("Next ▶");
+        assertThat(keyboard.getKeyboard().getLast().getFirst().getCallbackData())
                 .isEqualTo("tasks:page:1");
     }
 
@@ -333,9 +356,9 @@ class TaskmasterTelegramBotTests {
 
         verify(taskService).getActiveTasks(USER_ID, 1);
         InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
-        assertThat(keyboard.getKeyboard().getFirst().getFirst().getText())
+        assertThat(keyboard.getKeyboard().getLast().getFirst().getText())
                 .isEqualTo("◀ Previous");
-        assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+        assertThat(keyboard.getKeyboard().getLast().getFirst().getCallbackData())
                 .isEqualTo("tasks:page:0");
     }
 
@@ -359,7 +382,7 @@ class TaskmasterTelegramBotTests {
         assertThat(sentMethods).hasSize(1);
         assertThat(sentMethods.getFirst()).isInstanceOf(AnswerCallbackQuery.class);
         assertThat(((AnswerCallbackQuery) sentMethods.getFirst()).getText())
-                .isEqualTo("Invalid task page.");
+                .isEqualTo("Invalid action.");
     }
 
     @Test
@@ -370,7 +393,145 @@ class TaskmasterTelegramBotTests {
         SendMessage response = sendCallback(USER_ID, "tasks:page:999");
 
         verify(taskService).getActiveTasks(USER_ID, 999);
-        assertThat(response.getText()).contains("#101 — Task 101");
+        assertThat(response.getText())
+                .contains("Page 2/2", "📝 #101 | Task 101");
+    }
+
+    @Test
+    void requestsConfirmationBeforeDeletingTask() throws Exception {
+        when(taskService.findOwnedTaskTitle(USER_ID, 12L))
+                .thenReturn(Optional.of("Buy groceries"));
+
+        SendMessage response = sendCallback(USER_ID, "task:delete:12");
+
+        assertThat(response.getText()).isEqualTo("""
+                ⚠️ Delete task #12?
+
+                Buy groceries
+
+                This action cannot be undone.""");
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        assertThat(keyboard.getKeyboard().getFirst())
+                .extracting(button -> button.getText())
+                .containsExactly("✅ Yes, delete", "❌ Cancel");
+        assertThat(keyboard.getKeyboard().getFirst())
+                .extracting(button -> button.getCallbackData())
+                .containsExactly("task:delete-confirm:12", "task:delete-cancel:12");
+        verify(taskService, never()).deleteTask(anyLong(), anyLong());
+    }
+
+    @Test
+    void confirmsOwnTaskDeletionAndShowsNearestPage() throws Exception {
+        when(taskService.getActiveTasks(USER_ID, 1)).thenReturn(page(1, 2, 1));
+        sendCallback(USER_ID, "tasks:page:1");
+        when(taskService.findOwnedTaskTitle(USER_ID, 101L))
+                .thenReturn(Optional.of("Task 101"));
+        sendCallback(USER_ID, "task:delete:101");
+        when(taskService.deleteTask(USER_ID, 101L)).thenReturn(true);
+        when(taskService.getActiveTasks(USER_ID, 1)).thenReturn(page(0, 1, 10));
+
+        clearInvocations(telegramClient);
+        clearInvocations(taskService);
+        bot.consume(callbackUpdate(USER_ID, "task:delete-confirm:101"));
+
+        verify(taskService).deleteTask(USER_ID, 101L);
+        verify(taskService).getActiveTasks(USER_ID, 1);
+        assertThat(sentMessages())
+                .extracting(SendMessage::getText)
+                .containsExactly(
+                        "🗑 Task #101 deleted.",
+                        taskListFormatterText(page(0, 1, 10))
+                );
+    }
+
+    @Test
+    void cancelTaskDeletionDoesNotDelete() throws Exception {
+        when(taskService.findOwnedTaskTitle(USER_ID, 12L))
+                .thenReturn(Optional.of("Buy groceries"));
+        sendCallback(USER_ID, "task:delete:12");
+
+        SendMessage response = sendCallback(USER_ID, "task:delete-cancel:12");
+
+        assertThat(response.getText()).isEqualTo("Task deletion cancelled.");
+        verify(taskService, never()).deleteTask(anyLong(), anyLong());
+    }
+
+    @Test
+    void handlesMissingStaleAndMalformedTaskDeletionSafely() throws Exception {
+        when(taskService.findOwnedTaskTitle(USER_ID, 99L)).thenReturn(Optional.empty());
+        assertThat(sendCallback(USER_ID, "task:delete:99").getText())
+                .isEqualTo(TaskmasterTelegramBot.TASK_NOT_FOUND_RESPONSE);
+        assertThat(sendCallback(USER_ID, "task:delete-confirm:99").getText())
+                .isEqualTo(TaskmasterTelegramBot.TASK_NOT_FOUND_RESPONSE);
+
+        clearInvocations(telegramClient);
+        bot.consume(callbackUpdate(USER_ID, "task:delete:not-a-number"));
+
+        verify(taskService, never()).deleteTask(anyLong(), anyLong());
+        assertThat(telegramClientInvocations())
+                .filteredOn(AnswerCallbackQuery.class::isInstance)
+                .extracting(method -> ((AnswerCallbackQuery) method).getText())
+                .containsExactly("Invalid action.");
+    }
+
+    @Test
+    void settingsOffersDeleteAllAndRequiresConfirmation() throws Exception {
+        SendMessage settings = send(MainMenuKeyboard.SETTINGS_BUTTON);
+        InlineKeyboardMarkup settingsKeyboard =
+                (InlineKeyboardMarkup) settings.getReplyMarkup();
+        assertThat(settingsKeyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+                .isEqualTo("tasks:delete-all");
+
+        SendMessage confirmation = sendCallback(USER_ID, "tasks:delete-all");
+
+        assertThat(confirmation.getText()).isEqualTo("""
+                ⚠️ Delete all tasks?
+
+                This will permanently delete all of your tasks.
+
+                This action cannot be undone.""");
+        verify(taskService, never()).deleteAllTasks(anyLong());
+    }
+
+    @Test
+    void confirmsDeleteAllAndReportsCount() throws Exception {
+        sendCallback(USER_ID, "tasks:delete-all");
+        when(taskService.deleteAllTasks(USER_ID)).thenReturn(14);
+
+        SendMessage response = sendCallback(USER_ID, "tasks:delete-all-confirm");
+
+        assertThat(response.getText()).isEqualTo("""
+                🗑 All tasks deleted.
+
+                Deleted: 14""");
+        verify(taskService).deleteAllTasks(USER_ID);
+    }
+
+    @Test
+    void deleteAllHandlesEmptyUserAndCancel() throws Exception {
+        sendCallback(USER_ID, "tasks:delete-all");
+        SendMessage cancelled = sendCallback(USER_ID, "tasks:delete-all-cancel");
+        assertThat(cancelled.getText()).isEqualTo("Delete all cancelled.");
+        verify(taskService, never()).deleteAllTasks(anyLong());
+
+        sendCallback(USER_ID, "tasks:delete-all");
+        when(taskService.deleteAllTasks(USER_ID)).thenReturn(0);
+        SendMessage empty = sendCallback(USER_ID, "tasks:delete-all-confirm");
+        assertThat(empty.getText()).isEqualTo("📭 You have no tasks to delete.");
+    }
+
+    @Test
+    void directAndRepeatedDeleteAllConfirmationAreSafe() throws Exception {
+        assertThat(sendCallback(USER_ID, "tasks:delete-all-confirm").getText())
+                .isEqualTo("Deletion confirmation expired.");
+        verify(taskService, never()).deleteAllTasks(anyLong());
+
+        sendCallback(USER_ID, "tasks:delete-all");
+        when(taskService.deleteAllTasks(USER_ID)).thenReturn(1);
+        sendCallback(USER_ID, "tasks:delete-all-confirm");
+        assertThat(sendCallback(USER_ID, "tasks:delete-all-confirm").getText())
+                .isEqualTo("Deletion confirmation expired.");
+        verify(taskService).deleteAllTasks(USER_ID);
     }
 
     @Test
@@ -481,6 +642,17 @@ class TaskmasterTelegramBotTests {
                 .toList();
     }
 
+    private List<SendMessage> sentMessages() {
+        return telegramClientInvocations().stream()
+                .filter(SendMessage.class::isInstance)
+                .map(SendMessage.class::cast)
+                .toList();
+    }
+
+    private String taskListFormatterText(TaskPage taskPage) {
+        return new TaskListFormatter(new ApplicationProperties(TIME_ZONE)).format(taskPage);
+    }
+
     private void assertPriorityResponse(SendMessage response) {
         assertThat(response.getText()).isEqualTo(TaskConversationService.PRIORITY_PROMPT);
         assertPriorityKeyboard(response);
@@ -502,6 +674,15 @@ class TaskmasterTelegramBotTests {
                 .containsExactly("➕ Add task", "📋 My tasks");
         assertThat(buttonTexts(keyboard.getKeyboard().get(1)))
                 .containsExactly("📊 Statistics", "⚙️ Settings");
+    }
+
+    private void assertDeleteButton(SendMessage response, long taskId) {
+        assertThat(response.getReplyMarkup()).isInstanceOf(InlineKeyboardMarkup.class);
+        InlineKeyboardMarkup keyboard = (InlineKeyboardMarkup) response.getReplyMarkup();
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getText())
+                .isEqualTo("🗑 Delete #" + taskId);
+        assertThat(keyboard.getKeyboard().getFirst().getFirst().getCallbackData())
+                .isEqualTo("task:delete:" + taskId);
     }
 
     private List<String> buttonTexts(
@@ -573,6 +754,9 @@ class TaskmasterTelegramBotTests {
                         null
                 ))
                 .toList();
-        return new TaskPage(tasks, pageNumber, totalPages);
+        long totalTasks = totalPages <= 1
+                ? taskCount
+                : (long) (totalPages - 1) * TaskService.TASKS_PER_PAGE + taskCount;
+        return new TaskPage(tasks, pageNumber, totalPages, totalTasks);
     }
 }

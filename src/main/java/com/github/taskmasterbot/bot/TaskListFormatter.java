@@ -15,6 +15,7 @@ public class TaskListFormatter {
 
     public static final String EMPTY_TASKS_MESSAGE = "📭 You have no active tasks.";
 
+    private static final String TASK_SEPARATOR = "────────────";
     private static final DateTimeFormatter DEADLINE_FORMATTER =
             DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm");
 
@@ -29,9 +30,21 @@ public class TaskListFormatter {
             return EMPTY_TASKS_MESSAGE;
         }
 
-        return page.tasks().stream()
+        String tasks = page.tasks().stream()
                 .map(this::formatTask)
-                .collect(Collectors.joining("\n\n"));
+                .collect(Collectors.joining("\n\n" + TASK_SEPARATOR + "\n\n"));
+
+        return """
+                📋 Active tasks: %d
+                Page %d/%d
+
+                %s"""
+                .formatted(
+                        page.totalTasks(),
+                        page.pageNumber() + 1,
+                        page.totalPages(),
+                        tasks
+                );
     }
 
     private String formatTask(TaskListItem task) {
@@ -40,15 +53,14 @@ public class TaskListFormatter {
                 : DEADLINE_FORMATTER.format(task.deadline().atZone(properties.timeZone()));
 
         return """
-                #%d — %s
-                Priority: %s
-                Status: %s
-                Deadline: %s"""
+                %s #%d | %s
+                %s
+                📅 %s"""
                 .formatted(
+                        formatStatusIcon(task.status()),
                         task.id(),
                         task.title(),
                         formatPriority(task.priority()),
-                        formatStatus(task.status()),
                         deadline
                 );
     }
@@ -61,11 +73,11 @@ public class TaskListFormatter {
         };
     }
 
-    private String formatStatus(TaskStatus status) {
+    private String formatStatusIcon(TaskStatus status) {
         return switch (status) {
-            case TODO -> "📝 Todo";
-            case IN_PROGRESS -> "🚧 In progress";
-            case COMPLETED -> "✅ Completed";
+            case TODO -> "📝";
+            case IN_PROGRESS -> "🚧";
+            case COMPLETED -> "✅";
         };
     }
 }

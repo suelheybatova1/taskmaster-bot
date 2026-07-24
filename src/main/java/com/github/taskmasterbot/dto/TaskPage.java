@@ -5,7 +5,8 @@ import java.util.List;
 public record TaskPage(
         List<TaskListItem> tasks,
         int pageNumber,
-        int totalPages
+        int totalPages,
+        long totalTasks
 ) {
 
     public boolean hasPrevious() {

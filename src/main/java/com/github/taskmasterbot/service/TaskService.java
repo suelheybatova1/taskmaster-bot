@@ -16,6 +16,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 
 import java.util.EnumSet;
+import java.util.Optional;
 
 @Service
 public class TaskService {
@@ -66,8 +67,30 @@ public class TaskService {
                         .map(this::toListItem)
                         .toList(),
                 safePage,
-                result.getTotalPages()
+                result.getTotalPages(),
+                result.getTotalElements()
         );
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<String> findOwnedTaskTitle(Long telegramUserId, Long taskId) {
+        return taskRepository.findByIdAndTelegramUserTelegramUserId(taskId, telegramUserId)
+                .map(Task::getTitle);
+    }
+
+    @Transactional
+    public boolean deleteTask(Long telegramUserId, Long taskId) {
+        return taskRepository.findByIdAndTelegramUserTelegramUserId(taskId, telegramUserId)
+                .map(task -> {
+                    taskRepository.delete(task);
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    @Transactional
+    public int deleteAllTasks(Long telegramUserId) {
+        return taskRepository.deleteAllByTelegramUserId(telegramUserId);
     }
 
     private Page<Task> queryActiveTasks(Long telegramUserId, int page) {
