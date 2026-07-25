@@ -30,6 +30,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.time.Instant;
 import java.time.Clock;
+import java.time.ZoneId;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,12 +45,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Testcontainers
 class TaskServiceIntegrationIT {
 
+    private static final Instant TEST_NOW = Instant.parse("2026-07-22T10:00:00Z");
+    private static final ZoneId TEST_ZONE = ZoneId.of("Asia/Baku");
+
     @TestConfiguration(proxyBeanMethods = false)
     static class ClockConfiguration {
 
         @Bean
         Clock testClock() {
-            return Clock.systemUTC();
+            return Clock.fixed(TEST_NOW, TEST_ZONE);
         }
     }
 
@@ -468,14 +472,13 @@ class TaskServiceIntegrationIT {
         assertThat(taskService.startTask(2501L, task.getId()))
                 .isEqualTo(TaskTransitionResult.ALREADY_IN_PROGRESS);
 
-        Instant beforeCompletion = Instant.now();
         assertThat(taskService.completeTask(2501L, task.getId()))
                 .isEqualTo(TaskTransitionResult.SUCCESS);
         entityManager.flush();
         entityManager.clear();
         Task completed = taskRepository.findById(task.getId()).orElseThrow();
         assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(completed.getCompletedAt()).isAfterOrEqualTo(beforeCompletion);
+        assertThat(completed.getCompletedAt()).isEqualTo(TEST_NOW);
         assertThat(completed.getVersion()).isEqualTo(2);
         assertThat(taskService.completeTask(2501L, task.getId()))
                 .isEqualTo(TaskTransitionResult.ALREADY_COMPLETED);
@@ -492,7 +495,6 @@ class TaskServiceIntegrationIT {
         entityManager.flush();
         entityManager.clear();
 
-        Instant beforeCompletion = Instant.now();
         assertThat(taskService.completeTask(2601L, task.getId()))
                 .isEqualTo(TaskTransitionResult.SUCCESS);
         entityManager.flush();
@@ -500,7 +502,143 @@ class TaskServiceIntegrationIT {
 
         Task completed = taskRepository.findById(task.getId()).orElseThrow();
         assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(completed.getCompletedAt()).isAfterOrEqualTo(beforeCompletion);
+        assertThat(completed.getCompletedAt()).isEqualTo(TEST_NOW);
+    }
+
+    @Test
+    void returnsZeroStatisticsWhenUserHasNoTasks() {
+        var statistics = taskService.getStatistics(999999L);
+
+        assertThat(statistics.todoCount()).isZero();
+        assertThat(statistics.inProgressCount()).isZero();
+        assertThat(statistics.completedCount()).isZero();
+        assertThat(statistics.overdueCount()).isZero();
+        assertThat(statistics.dueTodayCount()).isZero();
+        assertThat(statistics.dueThisWeekCount()).isZero();
+        assertThat(statistics.totalCount()).isZero();
+        assertThat(statistics.completionRate()).isZero();
+    }
+
+    @Test
+    void aggregatesStatusesDeadlinesAndUsersWithoutLoadingTasks() {
+        Task overdueTodo = taskService.createTask(command(
+                2801L, 3801L, null, "Overdue todo", null,
+                TaskPriority.LOW, TEST_NOW.minusSeconds(1)
+        ));
+        taskService.createTask(command(
+                2801L, 3801L, null, "No deadline", null,
+                TaskPriority.MEDIUM, null
+        ));
+        Task dueTodayInProgress = taskService.createTask(command(
+                2801L, 3801L, null, "Due today", null,
+                TaskPriority.HIGH, TEST_NOW.plusSeconds(3600)
+        ));
+        Task completedWithPastDeadline = taskService.createTask(command(
+                2801L, 3801L, null, "Completed past deadline", null,
+                TaskPriority.HIGH, TEST_NOW.minusSeconds(3600)
+        ));
+        taskService.createTask(command(
+                2802L, 3802L, null, "Other user's overdue task", null,
+                TaskPriority.HIGH, TEST_NOW.minusSeconds(3600)
+        ));
+        entityManager.flush();
+
+        assertThat(taskService.startTask(2801L, dueTodayInProgress.getId()))
+                .isEqualTo(TaskTransitionResult.SUCCESS);
+        assertThat(taskService.completeTask(2801L, completedWithPastDeadline.getId()))
+                .isEqualTo(TaskTransitionResult.SUCCESS);
+        entityManager.flush();
+        entityManager.clear();
+
+        var statistics = taskService.getStatistics(2801L);
+
+        assertThat(statistics.todoCount()).isEqualTo(2);
+        assertThat(statistics.inProgressCount()).isEqualTo(1);
+        assertThat(statistics.completedCount()).isEqualTo(1);
+        assertThat(statistics.totalCount()).isEqualTo(4);
+        assertThat(statistics.overdueCount()).isEqualTo(1);
+        assertThat(statistics.dueTodayCount()).isEqualTo(2);
+        assertThat(statistics.dueThisWeekCount()).isEqualTo(2);
+        assertThat(statistics.completionRate()).isEqualTo(25);
+        assertThat(taskRepository.findById(overdueTodo.getId())).isPresent();
+    }
+
+    @Test
+    void appliesLocalDayAndCalendarWeekBoundaries() {
+        long userId = 2901L;
+        Instant startToday = Instant.parse("2026-07-21T20:00:00Z");
+        Instant startTomorrow = Instant.parse("2026-07-22T20:00:00Z");
+        Instant startNextWeek = Instant.parse("2026-07-26T20:00:00Z");
+        List<Instant> deadlines = List.of(
+                startToday,
+                startTomorrow.minusSeconds(1),
+                startTomorrow,
+                startNextWeek.minusSeconds(1),
+                startNextWeek,
+                startToday.minusSeconds(1)
+        );
+        for (int index = 0; index < deadlines.size(); index++) {
+            taskService.createTask(command(
+                    userId,
+                    3901L,
+                    null,
+                    "Boundary " + index,
+                    null,
+                    TaskPriority.LOW,
+                    deadlines.get(index)
+            ));
+        }
+        entityManager.flush();
+        entityManager.clear();
+
+        var statistics = taskService.getStatistics(userId);
+
+        assertThat(statistics.dueTodayCount()).isEqualTo(2);
+        assertThat(statistics.dueThisWeekCount()).isEqualTo(4);
+    }
+
+    @Test
+    void roundsCompletionRateToNearestWholePercent() {
+        Task first = taskService.createTask(command(
+                3001L, 4001L, null, "First", null,
+                TaskPriority.LOW, null
+        ));
+        Task second = taskService.createTask(command(
+                3001L, 4001L, null, "Second", null,
+                TaskPriority.LOW, null
+        ));
+        taskService.createTask(command(
+                3001L, 4001L, null, "Third", null,
+                TaskPriority.LOW, null
+        ));
+        entityManager.flush();
+        taskService.completeTask(3001L, first.getId());
+        taskService.completeTask(3001L, second.getId());
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(taskService.getStatistics(3001L).completionRate()).isEqualTo(67);
+    }
+
+    @Test
+    void deletedTasksAreNotCounted() {
+        Task deleted = taskService.createTask(command(
+                3101L, 4101L, null, "Deleted", null,
+                TaskPriority.LOW, null
+        ));
+        taskService.createTask(command(
+                3101L, 4101L, null, "Remaining", null,
+                TaskPriority.LOW, null
+        ));
+        entityManager.flush();
+        assertThat(taskService.deleteTask(3101L, deleted.getId())).isTrue();
+        entityManager.flush();
+        entityManager.clear();
+
+        var statistics = taskService.getStatistics(3101L);
+
+        assertThat(statistics.todoCount()).isEqualTo(1);
+        assertThat(statistics.totalCount()).isEqualTo(1);
     }
 
     @Test

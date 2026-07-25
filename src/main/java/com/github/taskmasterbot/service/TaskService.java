@@ -4,11 +4,13 @@ import com.github.taskmasterbot.dto.CreateTaskCommand;
 import com.github.taskmasterbot.dto.TaskListItem;
 import com.github.taskmasterbot.dto.TaskDetails;
 import com.github.taskmasterbot.dto.TaskPage;
+import com.github.taskmasterbot.dto.TaskStatistics;
 import com.github.taskmasterbot.dto.TelegramUserData;
 import com.github.taskmasterbot.entity.Task;
 import com.github.taskmasterbot.entity.TaskStatus;
 import com.github.taskmasterbot.entity.TelegramUser;
 import com.github.taskmasterbot.repository.TaskRepository;
+import com.github.taskmasterbot.repository.TaskStatisticsProjection;
 import com.github.taskmasterbot.repository.TelegramUserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,6 +22,10 @@ import java.util.EnumSet;
 import java.util.Optional;
 import java.time.Instant;
 import java.time.Clock;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.temporal.TemporalAdjusters;
 
 @Service
 public class TaskService {
@@ -136,6 +142,43 @@ public class TaskService {
     @Transactional
     public int deleteAllTasks(Long telegramUserId) {
         return taskRepository.deleteAllByTelegramUserId(telegramUserId);
+    }
+
+    @Transactional(readOnly = true)
+    public TaskStatistics getStatistics(Long telegramUserId) {
+        Instant now = Instant.now(clock);
+        ZoneId timeZone = clock.getZone();
+        LocalDate today = LocalDate.now(clock);
+        Instant startToday = today.atStartOfDay(timeZone).toInstant();
+        Instant startTomorrow = today.plusDays(1).atStartOfDay(timeZone).toInstant();
+        Instant startNextWeek = today
+                .with(TemporalAdjusters.next(DayOfWeek.MONDAY))
+                .atStartOfDay(timeZone)
+                .toInstant();
+
+        TaskStatisticsProjection aggregate = taskRepository.aggregateStatistics(
+                telegramUserId,
+                now,
+                startToday,
+                startTomorrow,
+                startNextWeek
+        );
+        long completionRate = aggregate.getTotalCount() == 0
+                ? 0
+                : Math.round(
+                        aggregate.getCompletedCount() * 100.0 / aggregate.getTotalCount()
+                );
+
+        return new TaskStatistics(
+                aggregate.getTodoCount(),
+                aggregate.getInProgressCount(),
+                aggregate.getCompletedCount(),
+                aggregate.getOverdueCount(),
+                aggregate.getDueTodayCount(),
+                aggregate.getDueThisWeekCount(),
+                aggregate.getTotalCount(),
+                completionRate
+        );
     }
 
     private Page<Task> queryActiveTasks(Long telegramUserId, int page) {

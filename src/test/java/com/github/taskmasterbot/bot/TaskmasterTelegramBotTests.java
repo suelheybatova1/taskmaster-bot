@@ -6,6 +6,7 @@ import com.github.taskmasterbot.dto.CreateTaskCommand;
 import com.github.taskmasterbot.dto.TaskListItem;
 import com.github.taskmasterbot.dto.TaskDetails;
 import com.github.taskmasterbot.dto.TaskPage;
+import com.github.taskmasterbot.dto.TaskStatistics;
 import com.github.taskmasterbot.entity.Task;
 import com.github.taskmasterbot.entity.TaskPriority;
 import com.github.taskmasterbot.entity.TaskStatus;
@@ -61,6 +62,8 @@ class TaskmasterTelegramBotTests {
                 .thenAnswer(invocation -> savedTask(invocation.getArgument(0)));
         when(taskService.getActiveTasks(anyLong(), anyInt()))
                 .thenReturn(new TaskPage(List.of(), 0, 0, 0));
+        when(taskService.getStatistics(anyLong()))
+                .thenReturn(new TaskStatistics(0, 0, 0, 0, 0, 0, 0, 0));
         conversationStore = new InMemoryConversationStore();
         TaskConversationService conversationService = new TaskConversationService(
                 conversationStore,
@@ -87,7 +90,8 @@ class TaskmasterTelegramBotTests {
                 new TaskDeletionKeyboard(deletionCallback),
                 actionCallback,
                 detailsFormatter,
-                new TaskDetailsKeyboard(actionCallback, deletionCallback, pageCallback)
+                new TaskDetailsKeyboard(actionCallback, deletionCallback, pageCallback),
+                new TaskStatisticsFormatter()
         );
     }
 
@@ -254,14 +258,51 @@ class TaskmasterTelegramBotTests {
     }
 
     @Test
-    void menuSelectionCancelsActiveFlowBeforeHandlingSelection() throws Exception {
+    void statisticsButtonCancelsActiveFlowAndDisplaysUserStatistics() throws Exception {
         advanceToDescription();
+        when(taskService.getStatistics(USER_ID))
+                .thenReturn(new TaskStatistics(5, 2, 14, 3, 1, 4, 21, 67));
 
         SendMessage response = send(MainMenuKeyboard.STATISTICS_BUTTON);
 
-        assertThat(response.getText()).isEqualTo(TaskmasterTelegramBot.STATISTICS_RESPONSE);
+        assertThat(response.getText()).isEqualTo("""
+                📊 Task statistics
+
+                📝 Todo: 5
+                🚧 In progress: 2
+                ✅ Completed: 14
+
+                ⚠️ Overdue: 3
+                📅 Due today: 1
+                📆 Due this week: 4
+
+                Total tasks: 21
+                Completion rate: 67%""");
+        verify(taskService).getStatistics(USER_ID);
         assertMainMenu(response);
         assertThat(conversationStore.isActive(USER_ID)).isFalse();
+    }
+
+    @Test
+    void formatsEmptyStatistics() throws Exception {
+        SendMessage response = send(MainMenuKeyboard.STATISTICS_BUTTON);
+
+        assertThat(response.getText()).isEqualTo("""
+                📊 Task statistics
+
+                You have no tasks yet.
+
+                Create your first task with ➕ Add task.""");
+    }
+
+    @Test
+    void statisticsFormatterDisplaysRoundedCompletionRate() {
+        String result = new TaskStatisticsFormatter().format(
+                new TaskStatistics(1, 1, 2, 0, 1, 2, 4, 50)
+        );
+
+        assertThat(result)
+                .contains("Total tasks: 4", "Completion rate: 50%");
     }
 
     @Test

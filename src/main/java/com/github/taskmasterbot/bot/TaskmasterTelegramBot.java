@@ -46,7 +46,6 @@ public class TaskmasterTelegramBot
             /cancel""";
 
     static final String DEFAULT_RESPONSE = "TaskMaster Bot is connected.";
-    static final String STATISTICS_RESPONSE = "Statistics will be added later.";
     static final String SETTINGS_RESPONSE = "⚙️ Settings";
     static final String TASK_NOT_FOUND_RESPONSE = "Task not found.";
     static final String OPTIMISTIC_LOCK_RESPONSE =
@@ -70,6 +69,7 @@ public class TaskmasterTelegramBot
     private final TaskActionCallback taskActionCallback;
     private final TaskDetailsFormatter taskDetailsFormatter;
     private final TaskDetailsKeyboard taskDetailsKeyboard;
+    private final TaskStatisticsFormatter taskStatisticsFormatter;
     private final Map<Long, Integer> currentTaskPages = new ConcurrentHashMap<>();
     private final Map<Long, PendingTaskDeletion> pendingTaskDeletions =
             new ConcurrentHashMap<>();
@@ -89,7 +89,8 @@ public class TaskmasterTelegramBot
             TaskDeletionKeyboard taskDeletionKeyboard,
             TaskActionCallback taskActionCallback,
             TaskDetailsFormatter taskDetailsFormatter,
-            TaskDetailsKeyboard taskDetailsKeyboard
+            TaskDetailsKeyboard taskDetailsKeyboard,
+            TaskStatisticsFormatter taskStatisticsFormatter
     ) {
         this.properties = properties;
         this.telegramClient = telegramClient;
@@ -105,6 +106,7 @@ public class TaskmasterTelegramBot
         this.taskActionCallback = taskActionCallback;
         this.taskDetailsFormatter = taskDetailsFormatter;
         this.taskDetailsKeyboard = taskDetailsKeyboard;
+        this.taskStatisticsFormatter = taskStatisticsFormatter;
     }
 
     @Override
@@ -180,7 +182,11 @@ public class TaskmasterTelegramBot
 
         if (MainMenuKeyboard.STATISTICS_BUTTON.equals(normalizedText)) {
             conversationService.reset(userId);
-            sendMessage(chatId, STATISTICS_RESPONSE, mainMenuKeyboard.create());
+            sendMessage(
+                    chatId,
+                    taskStatisticsFormatter.format(taskService.getStatistics(userId)),
+                    mainMenuKeyboard.create()
+            );
             return;
         }
 
