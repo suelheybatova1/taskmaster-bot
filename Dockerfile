@@ -5,6 +5,7 @@ COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
 RUN chmod +x mvnw && ./mvnw -B -ntp dependency:go-offline
 
+COPY .env.example .gitignore compose.yml ./
 COPY src/ src/
 RUN ./mvnw -B -ntp clean package
 

@@ -15,7 +15,7 @@
     <artifactId>taskmaster-bot</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>Taskmaster Bot</name>
-    <description>Production-ready foundation for a Telegram task management bot</description>
+    <description>Telegram task management bot with PostgreSQL persistence and deadline reminders</description>
 
     <properties>
         <java.version>21</java.version>

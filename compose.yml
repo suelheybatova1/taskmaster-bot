@@ -3,11 +3,11 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-taskmaster}
-      POSTGRES_USER: ${POSTGRES_USER:-taskmaster}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskmaster}
+      POSTGRES_DB: ${POSTGRES_DB:-taskmaster_db}
+      POSTGRES_USER: ${POSTGRES_USER:-taskmaster_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskmaster_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,9 +25,9 @@ services:
       - path: .env
         required: false
     environment:
-      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-taskmaster}
-      DB_USERNAME: ${POSTGRES_USER:-taskmaster}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-taskmaster}
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-taskmaster_db}
+      DB_USERNAME: ${POSTGRES_USER:-taskmaster_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-taskmaster_password}
     ports:
       - "${SERVER_PORT:-8080}:8080"
     depends_on:
