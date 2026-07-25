@@ -1,6 +1,7 @@
 package com.github.taskmasterbot.service;
 
 import com.github.taskmasterbot.dto.CreateTaskCommand;
+import com.github.taskmasterbot.config.ReminderProperties;
 import com.github.taskmasterbot.dto.TaskPage;
 import com.github.taskmasterbot.dto.TelegramUserData;
 import com.github.taskmasterbot.entity.Task;
@@ -41,7 +42,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
-@Import({TaskService.class, TaskServiceIntegrationIT.ClockConfiguration.class})
+@Import({
+        TaskService.class,
+        ReminderService.class,
+        TaskServiceIntegrationIT.ClockConfiguration.class
+})
 @Testcontainers
 class TaskServiceIntegrationIT {
 
@@ -54,6 +59,11 @@ class TaskServiceIntegrationIT {
         @Bean
         Clock testClock() {
             return Clock.fixed(TEST_NOW, TEST_ZONE);
+        }
+
+        @Bean
+        ReminderProperties reminderProperties() {
+            return new ReminderProperties(false, 60_000, 50, 3);
         }
     }
 
@@ -184,14 +194,14 @@ class TaskServiceIntegrationIT {
                 SELECT table_name
                 FROM information_schema.tables
                 WHERE table_schema = 'public'
-                  AND table_name IN ('telegram_users', 'tasks')
+                  AND table_name IN ('telegram_users', 'tasks', 'task_reminders')
                 ORDER BY table_name
                 """,
                 String.class
         );
 
-        assertThat(appliedMigrations).isEqualTo(2);
-        assertThat(tables).containsExactly("tasks", "telegram_users");
+        assertThat(appliedMigrations).isEqualTo(3);
+        assertThat(tables).containsExactly("task_reminders", "tasks", "telegram_users");
         assertThat(jdbcTemplate.queryForObject(
                 """
                 SELECT count(*)

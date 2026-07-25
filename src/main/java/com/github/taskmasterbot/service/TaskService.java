@@ -38,15 +38,18 @@ public class TaskService {
     private final TelegramUserRepository telegramUserRepository;
     private final TaskRepository taskRepository;
     private final Clock clock;
+    private final ReminderService reminderService;
 
     public TaskService(
             TelegramUserRepository telegramUserRepository,
             TaskRepository taskRepository,
-            Clock clock
+            Clock clock,
+            ReminderService reminderService
     ) {
         this.telegramUserRepository = telegramUserRepository;
         this.taskRepository = taskRepository;
         this.clock = clock;
+        this.reminderService = reminderService;
     }
 
     @Transactional
@@ -59,7 +62,9 @@ public class TaskService {
                 command.priority(),
                 command.deadline()
         );
-        return taskRepository.save(task);
+        Task savedTask = taskRepository.save(task);
+        reminderService.scheduleForTask(savedTask);
+        return savedTask;
     }
 
     @Transactional(readOnly = true)
@@ -126,6 +131,7 @@ public class TaskService {
         if (!task.orElseThrow().complete(Instant.now(clock))) {
             return TaskTransitionResult.ALREADY_COMPLETED;
         }
+        reminderService.cancelPendingForTask(taskId);
         return TaskTransitionResult.SUCCESS;
     }
 

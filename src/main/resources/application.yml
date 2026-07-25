@@ -28,6 +28,13 @@ telegram:
 application:
   time-zone: ${APP_TIME_ZONE:Asia/Baku}
 
+taskmaster:
+  reminders:
+    enabled: ${REMINDERS_ENABLED:true}
+    poll-interval: ${REMINDERS_POLL_INTERVAL:60000}
+    batch-size: ${REMINDERS_BATCH_SIZE:50}
+    max-attempts: ${REMINDERS_MAX_ATTEMPTS:3}
+
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful

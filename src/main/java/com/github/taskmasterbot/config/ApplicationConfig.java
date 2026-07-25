@@ -9,7 +9,11 @@ import org.telegram.telegrambots.meta.generics.TelegramClient;
 import java.time.Clock;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({TelegramProperties.class, ApplicationProperties.class})
+@EnableConfigurationProperties({
+        TelegramProperties.class,
+        ApplicationProperties.class,
+        ReminderProperties.class
+})
 public class ApplicationConfig {
 
     @Bean
