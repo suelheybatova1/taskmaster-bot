@@ -1,10 +1,12 @@
 spring:
+  config:
+    import: optional:file:.env[.properties]
   application:
     name: taskmaster-bot
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/taskmaster}
-    username: ${DB_USERNAME:taskmaster}
-    password: ${DB_PASSWORD:taskmaster}
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/taskmaster_db}
+    username: ${DB_USERNAME:taskmaster_user}
+    password: ${DB_PASSWORD:taskmaster_password}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:10}
   jpa:
